@@ -1,0 +1,173 @@
+---
+# Sevenbirches Homelab — VPS Rebuild Playbook
+# Rebuilds Oracle (Synket) and ihostart (personal) from scratch
+#
+# Prerequisites:
+#   - Fresh Ubuntu 24.04 on Oracle (145.241.239.205, ARM64)
+#   - SSH key access established
+#   - Cloudflare tunnel credentials available from CT142
+
+- name: Rebuild Oracle VPS (Synket platform)
+  hosts: oracle
+  become: true
+  vars:
+    synket_tunnel_id: "8418fbe6-482f-4210-a6a4-612f48de5d3a"
+
+  tasks:
+
+    - name: Update apt and install base packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - python3
+          - python3-pip
+          - python3-venv
+          - ufw
+          - fail2ban
+          - unattended-upgrades
+        state: present
+        update_cache: true
+
+    - name: Install Docker
+      ansible.builtin.shell: |
+        curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+
+    - name: Install cloudflared
+      ansible.builtin.shell: |
+        curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o /tmp/cloudflared.deb
+        dpkg -i /tmp/cloudflared.deb
+      args:
+        creates: /usr/bin/cloudflared
+
+    - name: Create Synket directory structure
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      loop:
+        - /opt/synket/api
+        - /opt/synket/data
+        - /opt/synket/logs
+        - /opt/synket/config
+        - /etc/cloudflared
+
+    - name: Deploy Synket API
+      ansible.builtin.shell: |
+        cd /opt/synket/api
+        python3 -m venv venv
+        venv/bin/pip install flask gunicorn requests
+        # Restore app.py from backup or GitHub
+        echo SYNKET_DEPLOYED
+      become_user: ubuntu
+      register: synket_deploy
+      changed_when: "'SYNKET_DEPLOYED' in synket_deploy.stdout"
+
+    - name: Configure UFW for Oracle
+      community.general.ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+        comment: SSH
+      notify: Enable UFW
+
+    - name: Configure fail2ban
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime  = 24h
+          findtime = 10m
+          maxretry = 3
+
+          [sshd]
+          enabled = true
+
+    - name: Show Oracle manual steps
+      ansible.builtin.debug:
+        msg:
+          - "MANUAL STEPS FOR ORACLE VPS:"
+          - "1. Restore /opt/synket/config/synket.env from CT142 credential inventory"
+          - "2. Restore /etc/cloudflared/ tunnel credentials from CT142"
+          - "3. Restore /opt/synket/data/synket.db from backup"
+          - "4. Restore synket-api.service systemd unit"
+          - "5. Run: cloudflared tunnel run {{ synket_tunnel_id }}"
+          - "6. Verify synket.sevenbirches.co.uk resolves correctly"
+
+  handlers:
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+        default: deny
+
+
+- name: Rebuild ihostart VPS (personal services)
+  hosts: ihostart
+  become: true
+
+  tasks:
+
+    - name: Update apt and install base packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - docker.io
+          - docker-compose
+          - ufw
+          - fail2ban
+          - nginx
+        state: present
+        update_cache: true
+
+    - name: Install Docker (fresh)
+      ansible.builtin.shell: |
+        curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+
+    - name: Show ihostart service list
+      ansible.builtin.debug:
+        msg:
+          - "SERVICES TO RESTORE ON IHOSTART:"
+          - "- Hermes (agent + dashboard) at port 9119"
+          - "- Freqtrade (paper/live trading) at port 8080"
+          - "- Honcho (Hermes memory backend) Docker stack"
+          - "- Plex at port 32500"
+          - "- Jellyfin + Jellyseerr"
+          - "- ntfy at port 2586"
+          - "- Nginx Proxy Manager (80/443/81)"
+          - "- cloudflared-resilience (KEEP STOPPED unless CT113 is down)"
+          - "- linkding at port 9090"
+          - ""
+          - "RESTORE FROM: vps-config-backup GitHub repo (private)"
+          - "Credentials: CT142 credential inventory"
+          - ""
+          - "CRITICAL: cloudflared-resilience must stay STOPPED"
+          - "Only start if CT113 cloudflared is confirmed dead"
+
+    - name: Configure UFW for ihostart
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: '22',    proto: tcp, comment: SSH }
+        - { port: '80',    proto: tcp, comment: HTTP }
+        - { port: '443',   proto: tcp, comment: HTTPS }
+        - { port: '32500', proto: tcp, comment: Plex }
+        - { port: '2586',  proto: tcp, comment: ntfy }
+        - { port: '51820', proto: udp, comment: WireGuard }
+        - { port: '51821', proto: udp, comment: WireGuard }
+      notify: Enable ihostart UFW
+
+  handlers:
+    - name: Enable ihostart UFW
+      community.general.ufw:
+        state: enabled
+        default: deny

@@ -1,0 +1,23 @@
+---
+# Sevenbirches Homelab — Master Site Playbook
+# Disaster Recovery / Rebuild Reference
+#
+# THIS PLAYBOOK IS FOR REBUILD SCENARIOS ONLY
+# Do not run against a live working system
+#
+# Usage after bare metal Proxmox reinstall:
+#   ansible-playbook site.yml
+#
+# Run individual stages:
+#   ansible-playbook site.yml --tags containers
+#   ansible-playbook site.yml --tags services
+#   ansible-playbook site.yml --tags vps
+
+- import_playbook: rebuild_containers.yml
+  tags: containers
+
+- import_playbook: rebuild_services.yml
+  tags: services
+
+- import_playbook: rebuild_vps.yml
+  tags: vps

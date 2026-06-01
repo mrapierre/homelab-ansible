@@ -1,0 +1,273 @@
+---
+# Sevenbirches Homelab — Container Rebuild Playbook
+# Recreates all LXC containers and VMs from scratch on a fresh Proxmox host
+#
+# Prerequisites:
+#   - Fresh Proxmox install on 192.168.55.10
+#   - QNAP NAS mounted at 192.168.55.50 (PBS datastore + media)
+#   - PBS (CT106) restored first from backup
+#   - Network: vmbr0, subnet 192.168.55.x, gateway 192.168.55.1
+#
+# Run order matters — PBS must exist before restoring other containers
+# Recommended: restore from PBS backup rather than recreating from scratch
+
+- name: Rebuild LXC containers on fresh Proxmox host
+  hosts: pve
+  become: false
+  vars:
+    proxmox_node: pve
+    default_storage: local-lvm
+    nas_storage: tank-storage        # QNAP ZFS pool
+    backup_storage: Backup-server    # PBS datastore
+    ubuntu_template: local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst
+    debian_template: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+
+    containers:
+      # Format: vmid, name, cores, memory(MB), disk(GB), ip, storage, template, notes
+      - vmid: 100
+        name: plex
+        cores: 2
+        memory: 2048
+        disk: 20
+        ip: 192.168.55.100/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ ubuntu_template }}"
+        features: nesting=1
+
+      - vmid: 101
+        name: sonarr
+        cores: 2
+        memory: 1024
+        disk: 8
+        ip: 192.168.55.101/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        features: nesting=1
+
+      - vmid: 102
+        name: radarr
+        cores: 2
+        memory: 1024
+        disk: 8
+        ip: 192.168.55.102/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        features: nesting=1
+
+      - vmid: 103
+        name: adguard-home
+        cores: 1
+        memory: 512
+        disk: 4
+        ip: 192.168.55.103/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+
+      - vmid: 104
+        name: ai-lab
+        cores: 2
+        memory: 2048
+        disk: 16
+        ip: 192.168.55.104/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ ubuntu_template }}"
+        features: nesting=1
+
+      - vmid: 105
+        name: prowlarr
+        cores: 1
+        memory: 512
+        disk: 4
+        ip: 192.168.55.105/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+
+      - vmid: 106
+        name: proxmox-backup-server
+        cores: 2
+        memory: 2048
+        disk: 16
+        ip: 192.168.55.106/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        notes: "Restore this FIRST from external backup before other containers"
+
+      - vmid: 110
+        name: sabnzbd
+        cores: 2
+        memory: 2048
+        disk: 8
+        ip: 192.168.55.110/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ ubuntu_template }}"
+        features: nesting=1
+
+      - vmid: 113
+        name: cloudflared
+        cores: 1
+        memory: 256
+        disk: 2
+        ip: 192.168.55.113/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        notes: "Tunnel ID: dcc88300-9517-4e1a-b5a4-103397ba6779. Config in /etc/cloudflared/config.yml"
+
+      - vmid: 116
+        name: n8n
+        cores: 2
+        memory: 4096
+        disk: 16
+        ip: 192.168.55.116/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        features: nesting=1
+
+      - vmid: 120
+        name: docker
+        cores: 4
+        memory: 4096
+        disk: 64
+        ip: 192.168.55.120/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ ubuntu_template }}"
+        features: nesting=1,keyctl=1
+        notes: "Docker host — keyctl required for Docker"
+
+      - vmid: 130
+        name: vaultwarden
+        cores: 1
+        memory: 512
+        disk: 4
+        ip: 192.168.55.130/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+
+      - vmid: 141
+        name: osint-lab
+        cores: 2
+        memory: 2048
+        disk: 16
+        ip: 192.168.55.141/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        features: nesting=1
+
+      - vmid: 142
+        name: private-docs
+        cores: 1
+        memory: 512
+        disk: 8
+        ip: 192.168.55.142/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        notes: "WireGuard-only access. Contains credential inventory."
+
+      - vmid: 145
+        name: kali-lab
+        cores: 2
+        memory: 2048
+        disk: 20
+        ip: 192.168.55.145/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: local:vztmpl/kali-linux-2024.1-amd64.tar.zst
+        notes: "Also attach to vmbr99 (isolated lab network 10.99.0.0/24)"
+
+      - vmid: 999
+        name: emergency
+        cores: 1
+        memory: 512
+        disk: 4
+        ip: 192.168.55.254/24
+        gw: 192.168.55.1
+        storage: "{{ default_storage }}"
+        template: "{{ debian_template }}"
+        notes: "Emergency fallback access container"
+
+    vms:
+      - vmid: 150
+        name: haos
+        cores: 2
+        memory: 2048
+        disk: 32
+        ip: 192.168.55.150/24
+        storage: "{{ nas_storage }}"
+        notes: "Home Assistant OS. Download HAOS image and import. home.sevenbirches.co.uk"
+
+      - vmid: 151
+        name: homelab-agent
+        cores: 2
+        memory: 2048
+        disk: 8
+        ip: 192.168.55.151/24
+        storage: "{{ nas_storage }}"
+        notes: "Debian 12 VM. homelab-api.service port 5050. KB at /opt/homelab-agent/data/knowledge.db"
+
+      - vmid: 300
+        name: maltego-hub
+        cores: 2
+        memory: 4096
+        disk: 40
+        ip: 192.168.55.300/24
+        storage: "{{ default_storage }}"
+        notes: "Maltego OSINT platform"
+
+  tasks:
+
+    - name: Show rebuild plan
+      ansible.builtin.debug:
+        msg: >
+          About to recreate {{ containers | length }} LXC containers
+          and {{ vms | length }} VMs.
+          ENSURE PBS backups are available before proceeding.
+          Preferred method: restore from PBS rather than recreating.
+
+    - name: Pause for confirmation
+      ansible.builtin.pause:
+        prompt: |
+          Review the plan above.
+          Press ENTER to continue or Ctrl+C to abort.
+
+    - name: Create LXC containers
+      ansible.builtin.command: >
+        pct create {{ item.vmid }}
+        {{ item.template }}
+        --hostname {{ item.name }}
+        --cores {{ item.cores }}
+        --memory {{ item.memory }}
+        --rootfs {{ item.storage }}:{{ item.disk }}
+        --net0 name=eth0,bridge=vmbr0,ip={{ item.ip }},gw={{ item.gw }}
+        --unprivileged 1
+        --features {{ item.features | default('nesting=0') }}
+        --start 0
+      loop: "{{ containers }}"
+      register: ct_create
+      failed_when: ct_create.rc != 0 and 'already exists' not in ct_create.stderr
+      changed_when: ct_create.rc == 0
+
+    - name: Start containers
+      ansible.builtin.command: pct start {{ item.vmid }}
+      loop: "{{ containers }}"
+      register: ct_start
+      failed_when: ct_start.rc != 0 and 'already running' not in ct_start.stderr
+      changed_when: ct_start.rc == 0
+
+    - name: Show container notes
+      ansible.builtin.debug:
+        msg: "CT{{ item.vmid }} ({{ item.name }}): {{ item.notes }}"
+      loop: "{{ containers + vms }}"
+      when: item.notes is defined

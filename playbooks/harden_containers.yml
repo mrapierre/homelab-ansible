@@ -1,0 +1,112 @@
+---
+# Sevenbirches Homelab — LXC Container Common Hardening
+# Connects to Proxmox host via SSH, runs commands inside containers via pct exec
+# Simpler and more reliable than proxmox_pct_remote for this use case
+#
+# Usage:
+#   ansible-playbook playbooks/harden_containers.yml
+#   ansible-playbook playbooks/harden_containers.yml -e "target_vmids=103,113"
+
+- name: Harden LXC containers via pct exec
+  hosts: pve
+  become: false
+  vars:
+    # All running LXC VMIDs — update if containers added/removed
+    target_vmids:
+      - 100  # plex
+      - 101  # sonarr
+      - 102  # radarr
+      - 103  # adguard-home
+      - 104  # ai-lab
+      - 105  # prowlarr
+      - 110  # sabnzbd
+      - 113  # cloudflared
+      - 116  # n8n
+      - 120  # docker
+      - 130  # vaultwarden
+      - 141  # osint-lab
+      - 142  # private-docs
+      - 145  # kali-lab
+
+  tasks:
+
+    - name: Get list of running containers
+      ansible.builtin.command: pct list
+      register: pct_list
+      changed_when: false
+
+    - name: Show running containers
+      ansible.builtin.debug:
+        msg: "{{ pct_list.stdout_lines }}"
+
+    - name: Harden each container
+      ansible.builtin.shell: |
+        VMID={{ item }}
+        # Check container is running
+        STATUS=$(pct status $VMID 2>/dev/null | awk '{print $2}')
+        if [ "$STATUS" != "running" ]; then
+          echo "CT$VMID: SKIPPED (status: $STATUS)"
+          exit 0
+        fi
+
+        echo "=== CT$VMID hardening ==="
+
+        # Install packages (best effort — some containers may not have apt)
+        pct exec $VMID -- bash -c "
+          apt-get update -qq 2>/dev/null
+          apt-get install -y unattended-upgrades fail2ban 2>/dev/null || true
+        " 2>/dev/null && echo "CT$VMID: packages OK" || echo "CT$VMID: packages skipped (no apt)"
+
+        # Configure fail2ban
+        pct exec $VMID -- bash -c "
+          cat > /etc/fail2ban/jail.local << 'EOF'
+        [DEFAULT]
+        bantime  = 1h
+        findtime = 10m
+        maxretry = 3
+
+        [sshd]
+        enabled  = true
+        port     = ssh
+        maxretry = 3
+        bantime  = 24h
+        EOF
+          systemctl enable fail2ban --quiet 2>/dev/null
+          systemctl restart fail2ban 2>/dev/null
+          echo fail2ban_done
+        " 2>/dev/null && echo "CT$VMID: fail2ban OK" || echo "CT$VMID: fail2ban skipped"
+
+        # Harden SSH if running
+        pct exec $VMID -- bash -c "
+          if systemctl is-active sshd &>/dev/null || systemctl is-active ssh &>/dev/null; then
+            sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config 2>/dev/null
+            sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config 2>/dev/null
+            sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config 2>/dev/null
+            grep -q '^MaxAuthTries' /etc/ssh/sshd_config && \
+              sed -i 's/^MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config || \
+              echo 'MaxAuthTries 3' >> /etc/ssh/sshd_config
+            systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null
+            echo ssh_hardened
+          else
+            echo ssh_not_running
+          fi
+        " 2>/dev/null && echo "CT$VMID: SSH OK" || echo "CT$VMID: SSH skipped"
+
+        # Enable unattended-upgrades
+        pct exec $VMID -- bash -c "
+          systemctl enable unattended-upgrades --quiet 2>/dev/null
+          systemctl start unattended-upgrades 2>/dev/null
+          echo uu_done
+        " 2>/dev/null && echo "CT$VMID: unattended-upgrades OK" || echo "CT$VMID: unattended-upgrades skipped"
+
+        echo "=== CT$VMID done ==="
+      loop: "{{ target_vmids }}"
+      register: harden_results
+      changed_when: false
+
+    - name: Show hardening results
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ harden_results.results }}"
+      loop_control:
+        label: "CT{{ item.item }}"

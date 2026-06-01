@@ -1,0 +1,166 @@
+---
+# Sevenbirches Homelab — Service Rebuild Playbook
+# Installs and configures software inside each container after rebuild
+# Run AFTER rebuild_containers.yml
+#
+# Each role covers one container's full setup.
+# Skip individual containers with: --skip-tags ct116
+
+- name: Rebuild services inside containers
+  hosts: pve
+  become: false
+
+  tasks:
+
+    # =========================================================
+    # CT104 — ai-lab (homelab MCP server)
+    # =========================================================
+    - name: CT104 ai-lab — install Node.js and homelab-mcp
+      ansible.builtin.shell: |
+        pct exec 104 -- bash -c "
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+          mkdir -p /opt/mcp-server
+          # Clone from GitHub
+          git clone git@github.com:mrapierre/homelab-mcp-server.git /opt/mcp-server
+          cd /opt/mcp-server && npm install
+          # Install as systemd service
+          cp homelab-mcp.service /etc/systemd/system/
+          systemctl enable homelab-mcp
+          systemctl start homelab-mcp
+          echo CT104_DONE
+        "
+      register: ct104_result
+      changed_when: "'CT104_DONE' in ct104_result.stdout"
+      tags: ct104
+
+    # =========================================================
+    # CT113 — cloudflared
+    # =========================================================
+    - name: CT113 cloudflared — install and configure tunnel
+      ansible.builtin.shell: |
+        pct exec 113 -- bash -c "
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+          dpkg -i /tmp/cloudflared.deb
+          mkdir -p /etc/cloudflared /root/.cloudflared
+          # NOTE: Restore config.yml and tunnel credentials from CT142 backup
+          # Tunnel ID: dcc88300-9517-4e1a-b5a4-103397ba6779
+          # config.yml location: /etc/cloudflared/config.yml (NOT /root/.cloudflared)
+          cloudflared service install
+          systemctl enable cloudflared
+          echo CT113_DONE
+        "
+      register: ct113_result
+      changed_when: "'CT113_DONE' in ct113_result.stdout"
+      tags: ct113
+
+    # =========================================================
+    # CT116 — n8n
+    # =========================================================
+    - name: CT116 n8n — install Docker and n8n
+      ansible.builtin.shell: |
+        pct exec 116 -- bash -c "
+          curl -fsSL https://get.docker.com | sh
+          mkdir -p /opt/n8n
+          cat > /opt/n8n/docker-compose.yml << 'EOF'
+          version: '3'
+          services:
+            n8n:
+              image: n8nio/n8n:latest
+              restart: unless-stopped
+              ports:
+                - '5678:5678'
+              volumes:
+                - n8n_data:/home/node/.n8n
+              environment:
+                - N8N_BASIC_AUTH_ACTIVE=true
+                - EXECUTIONS_DATA_PRUNE=true
+                - EXECUTIONS_DATA_MAX_AGE=7
+                - EXECUTIONS_DATA_PRUNE_MAX_COUNT=1000
+          volumes:
+            n8n_data:
+          EOF
+          cd /opt/n8n && docker compose up -d
+          echo CT116_DONE
+        "
+      register: ct116_result
+      changed_when: "'CT116_DONE' in ct116_result.stdout"
+      tags: ct116
+
+    # =========================================================
+    # CT120 — Docker host (Sablier stack)
+    # =========================================================
+    - name: CT120 docker — install Docker
+      ansible.builtin.shell: |
+        pct exec 120 -- bash -c "
+          apt-get update -qq
+          curl -fsSL https://get.docker.com | sh
+          # Restore docker-compose files from vps-config-backup GitHub repo
+          # Sablier stack: /opt/sablier/docker-compose.yml
+          # Standalone services: /root/service/
+          # IMPORTANT: restore volumes from PBS backup for persistent data
+          echo CT120_DONE
+        "
+      register: ct120_result
+      changed_when: "'CT120_DONE' in ct120_result.stdout"
+      tags: ct120
+
+    # =========================================================
+    # CT141 — OSINT lab
+    # =========================================================
+    - name: CT141 osint-lab — install tools and dashboard
+      ansible.builtin.shell: |
+        pct exec 141 -- bash -c "
+          apt-get update -qq
+          apt-get install -y python3 python3-pip git curl chromium
+          git clone git@github.com:mrapierre/osint-dashboard.git /opt/osint
+          cd /opt/osint && pip3 install -r requirements.txt --break-system-packages
+          # i-bidder scraper
+          mkdir -p /opt/ibidder
+          # Restore scraper files from PBS backup
+          # Restore /root/.env with DEEPSEEK_API_KEY
+          echo CT141_DONE
+        "
+      register: ct141_result
+      changed_when: "'CT141_DONE' in ct141_result.stdout"
+      tags: ct141
+
+    # =========================================================
+    # CT151/VM151 — homelab-agent
+    # =========================================================
+    - name: VM151 homelab-agent — install and configure
+      ansible.builtin.shell: |
+        ssh root@192.168.55.151 "
+          apt-get update -qq
+          apt-get install -y python3 python3-pip python3-venv git sqlite3
+          git clone git@github.com:mrapierre/homelab-agent.git /opt/homelab-agent
+          cd /opt/homelab-agent
+          python3 -m venv venv
+          venv/bin/pip install -r requirements.txt
+          # Restore knowledge.db from PBS backup
+          # Install systemd service
+          cp homelab-api.service /etc/systemd/system/
+          systemctl enable homelab-api
+          systemctl start homelab-api
+          echo VM151_DONE
+        "
+      register: vm151_result
+      changed_when: "'VM151_DONE' in vm151_result.stdout"
+      tags: vm151
+
+    - name: Show post-rebuild manual steps
+      ansible.builtin.debug:
+        msg:
+          - "========================================="
+          - "MANUAL STEPS REQUIRED AFTER THIS PLAYBOOK"
+          - "========================================="
+          - "1. CT113: Copy tunnel credentials JSON from CT142 backup to /etc/cloudflared/"
+          - "2. CT113: Copy config.yml from CT142 backup to /etc/cloudflared/config.yml"
+          - "3. CT116: Restore n8n workflows from PBS backup volume"
+          - "4. CT120: Restore Docker volumes from PBS backup"
+          - "5. CT130: Restore Vaultwarden data from PBS backup"
+          - "6. CT142: Restore credential inventory from PBS backup (PRIORITY)"
+          - "7. VM151: Restore knowledge.db from PBS backup"
+          - "8. All:   Run harden_servers.yml after rebuild complete"
+          - "9. DNS:   Verify Cloudflare DNS records still point correctly"
+          - "10. PBS:  Reconfigure daily backup job after CT106 restore"
