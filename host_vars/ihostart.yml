@@ -1,0 +1,9 @@
+---
+# ihostart VPS — extra UFW ports beyond SSH
+ufw_extra_ports:
+  - { port: '80',    proto: tcp, comment: 'HTTP - NPM' }
+  - { port: '443',   proto: tcp, comment: 'HTTPS - NPM' }
+  - { port: '32500', proto: tcp, comment: 'Plex' }
+  - { port: '2586',  proto: tcp, comment: 'ntfy' }
+  - { port: '51820', proto: udp, comment: 'WireGuard' }
+  - { port: '51821', proto: udp, comment: 'WireGuard' }
