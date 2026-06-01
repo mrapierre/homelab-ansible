@@ -1,0 +1,151 @@
+---
+# VM151 — Homelab Agent (Metrics API + Knowledge Base)
+# VERIFIED 01 June 2026
+# OS: Debian 12 (bookworm)
+# VM specs: 2 cores, 2GB RAM, 8GB disk (tank-storage)
+# IP: 192.168.55.151 (static)
+# Port: 5050 (Flask API), 22 (SSH)
+# Service: homelab-api.service runs metrics_api.py
+# Repo: github.com/mrapierre/homelab-agent (private)
+# Python: 3.11.2 in venv at /opt/homelab-agent/venv/
+# Critical data at /opt/homelab-agent/data/:
+#   knowledge.db  — full KB (sessions, backlog, facts, lessons, containers)
+#   metrics.db    — historical metrics
+#   business.db   — business/Synket data
+#   garden.db     — garden monitoring data
+#   fcm_token.txt — Firebase Cloud Messaging token
+# Also: firebase-service-account.json, n8n_api.key, aliases.json
+# UFW: 22, 5050, 80, 443 allowed
+
+- name: VM151 — Homelab Agent
+  hosts: vm151
+  become: true
+  tags: vm151
+
+  tasks:
+
+    - name: VM151 — Install system dependencies
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - git
+          - sqlite3
+          - curl
+          - ufw
+          - fail2ban
+          - unattended-upgrades
+        state: present
+        update_cache: true
+
+    - name: VM151 — Clone homelab-agent from GitHub
+      ansible.builtin.git:
+        repo: git@github.com:mrapierre/homelab-agent.git
+        dest: /opt/homelab-agent
+        version: main
+        accept_hostkey: true
+      # Note: requires deploy key or SSH key authorised on GitHub
+
+    - name: VM151 — Create virtualenv and install requirements
+      ansible.builtin.shell: |
+        python3 -m venv /opt/homelab-agent/venv
+        /opt/homelab-agent/venv/bin/pip install -r /opt/homelab-agent/requirements.txt
+        echo VENV_DONE
+      register: venv_result
+      changed_when: "'VENV_DONE' in venv_result.stdout"
+
+    - name: VM151 — Create data and logs directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/homelab-agent/data
+        - /opt/homelab-agent/logs
+
+    - name: VM151 — Install homelab-api systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/homelab-api.service
+        content: |
+          [Unit]
+          Description=Homelab Metrics API
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=/opt/homelab-agent
+          ExecStart=/opt/homelab-agent/venv/bin/python3 /opt/homelab-agent/metrics_api.py
+          Restart=always
+          RestartSec=10
+          StandardOutput=append:/opt/homelab-agent/logs/api.log
+          StandardError=append:/opt/homelab-agent/logs/api.log
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: VM151 — Configure UFW
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: tcp
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: '22',   comment: 'SSH' }
+        - { port: '5050', comment: 'homelab-api' }
+        - { port: '80',   comment: 'HTTP' }
+        - { port: '443',  comment: 'HTTPS' }
+      notify: Enable UFW
+
+    - name: VM151 — Configure fail2ban
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime  = 24h
+          findtime = 10m
+          maxretry = 3
+
+          [sshd]
+          enabled = true
+          port    = ssh
+          maxretry = 3
+      notify: Restart fail2ban
+
+    - name: VM151 — Enable services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        daemon_reload: true
+      loop:
+        - homelab-api
+        - fail2ban
+        - unattended-upgrades
+
+    - name: VM151 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "RESTORE BEFORE STARTING homelab-api.service:"
+          - "1. Restore /opt/homelab-agent/data/ from PBS backup — contains all databases:"
+          - "   knowledge.db (KB), metrics.db, business.db, garden.db, fcm_token.txt"
+          - "2. Restore /opt/homelab-agent/firebase-service-account.json from CT142"
+          - "3. Restore /opt/homelab-agent/n8n_api.key from CT142"
+          - "4. Restore /opt/homelab-agent/aliases.json from PBS backup"
+          - "5. Restore /opt/homelab-agent/config.yaml from PBS backup"
+          - "6. systemctl start homelab-api after all files restored"
+          - "7. Verify: curl http://192.168.55.151:5050/health"
+          - "8. Note: knowledge.db exists in BOTH /opt/homelab-agent/ and /opt/homelab-agent/data/"
+          - "   The data/ copy is the primary one used by the API"
+          - "9. Add Proxmox host SSH key to authorized_keys for MCP and n8n access"
+
+  handlers:
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+        default: deny
+
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
