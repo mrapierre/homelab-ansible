@@ -1,0 +1,87 @@
+---
+# CT100 — Plex Media Server
+# OS: Ubuntu 24.04 LTS
+# Storage: tank-storage (NAS ZFS pool), 55GB root
+# Hardware: Intel GPU passthrough (card1 + renderD128) for transcoding
+# NAS mounts: /mnt/nas/Media, /mnt/nas/Expanded, /mnt/nas/Work, /mnt/nas/Workspace
+# Port: 32400
+#
+# STEP 1: Create the container via Proxmox UI or rebuild_containers.yml
+# STEP 2: Add to LXC config BEFORE starting (requires Proxmox host access):
+#
+#   pct set 100 --dev0 /dev/dri/card1,gid=44
+#   pct set 100 --dev1 /dev/dri/renderD128,gid=104
+#   pct set 100 --mp0 /mnt/pve/nas/Expanded,mp=/mnt/nas/Expanded
+#   pct set 100 --mp1 /mnt/pve/nas/Media,mp=/mnt/nas/Media
+#   pct set 100 --mp2 /mnt/pve/nas/Work,mp=/mnt/nas/Work
+#   pct set 100 --mp3 /mnt/pve/nas/Workspace,mp=/mnt/nas/Workspace
+#   pct set 100 --features keyctl=1,nesting=1
+#
+# STEP 3: Run this playbook
+
+- name: CT100 — Plex Media Server
+  hosts: pve
+  become: false
+  tags: ct100
+
+  tasks:
+
+    - name: CT100 — Verify container is running
+      ansible.builtin.command: pct status 100
+      register: ct100_status
+      failed_when: "'running' not in ct100_status.stdout"
+      changed_when: false
+
+    - name: CT100 — Install dependencies and Intel GPU tools
+      ansible.builtin.shell: |
+        pct exec 100 -- bash -c "
+          apt-get update -qq
+          apt-get install -y \
+            curl \
+            wget \
+            intel-gpu-tools \
+            intel-opencl-icd \
+            va-driver-all \
+            ocl-icd-libopencl1 \
+            vainfo \
+            numactl
+          echo DEPS_DONE
+        "
+      register: deps_result
+      changed_when: "'DEPS_DONE' in deps_result.stdout"
+
+    - name: CT100 — Add Plex repository and install
+      ansible.builtin.shell: |
+        pct exec 100 -- bash -c "
+          curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key | gpg --dearmor -o /usr/share/keyrings/plex.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/plex.gpg] https://downloads.plex.tv/repo/deb public main' > /etc/apt/sources.list.d/plexmediaserver.list
+          apt-get update -qq
+          apt-get install -y plexmediaserver
+          systemctl enable plexmediaserver
+          systemctl start plexmediaserver
+          echo PLEX_DONE
+        "
+      register: plex_result
+      changed_when: "'PLEX_DONE' in plex_result.stdout"
+
+    - name: CT100 — Verify Plex is running
+      ansible.builtin.shell: |
+        pct exec 100 -- systemctl is-active plexmediaserver
+      register: plex_status
+      changed_when: false
+
+    - name: CT100 — Show status and manual steps
+      ansible.builtin.debug:
+        msg:
+          - "Plex service: {{ plex_status.stdout }}"
+          - ""
+          - "MANUAL STEPS REQUIRED:"
+          - "1. Open http://192.168.55.100:32400/web in browser to claim server"
+          - "2. Sign in with Plex account to claim the new server"
+          - "3. Add media libraries pointing to:"
+          - "   - /mnt/nas/Media (primary media)"
+          - "   - /mnt/nas/Expanded (expanded media)"
+          - "4. If restoring from PBS backup, restore /var/lib/plexmediaserver"
+          - "   to preserve watch history, metadata and settings"
+          - "5. Verify Intel GPU transcoding: vainfo should show supported formats"
+          - "   Run: pct exec 100 -- vainfo"

@@ -1,166 +1,563 @@
 ---
-# Sevenbirches Homelab — Service Rebuild Playbook
-# Installs and configures software inside each container after rebuild
-# Run AFTER rebuild_containers.yml
+# CT101 — Sonarr (TV Show Management)
+# OS: Debian 12, 2 cores, 1GB RAM, 4GB root (tank-storage)
+# NAS mounts: /mnt/nas/Media, /mnt/nas/Expanded, /mnt/nas/Work, /mnt/nas/Workspace
+# Port: 8989
+# No GPU passthrough needed
 #
-# Each role covers one container's full setup.
-# Skip individual containers with: --skip-tags ct116
+# PRE-START LXC CONFIG:
+#   pct set 101 --mp0 /mnt/pve/nas/Expanded,mp=/mnt/nas/Expanded
+#   pct set 101 --mp1 /mnt/pve/nas/Media,mp=/mnt/nas/Media
+#   pct set 101 --mp2 /mnt/pve/nas/Work,mp=/mnt/nas/Work
+#   pct set 101 --mp3 /mnt/pve/nas/Workspace,mp=/mnt/nas/Workspace
+#   pct set 101 --features nesting=1
 
-- name: Rebuild services inside containers
+- name: CT101 — Sonarr
   hosts: pve
   become: false
-
+  tags: ct101
   tasks:
-
-    # =========================================================
-    # CT104 — ai-lab (homelab MCP server)
-    # =========================================================
-    - name: CT104 ai-lab — install Node.js and homelab-mcp
+    - name: CT101 — Install Sonarr v4
       ansible.builtin.shell: |
-        pct exec 104 -- bash -c "
-          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-          apt-get install -y nodejs
-          mkdir -p /opt/mcp-server
-          # Clone from GitHub
-          git clone git@github.com:mrapierre/homelab-mcp-server.git /opt/mcp-server
-          cd /opt/mcp-server && npm install
-          # Install as systemd service
-          cp homelab-mcp.service /etc/systemd/system/
-          systemctl enable homelab-mcp
-          systemctl start homelab-mcp
-          echo CT104_DONE
+        pct exec 101 -- bash -c "
+          apt-get update -qq
+          apt-get install -y curl sqlite3
+          # Add Sonarr repo
+          curl -fsSL https://repo.sonarr.tv/keys/sonarr.asc | gpg --dearmor -o /usr/share/keyrings/sonarr.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/sonarr.gpg] https://repo.sonarr.tv/ stable main' > /etc/apt/sources.list.d/sonarr.list
+          apt-get update -qq
+          apt-get install -y sonarr
+          systemctl enable sonarr
+          systemctl start sonarr
+          echo CT101_DONE
         "
-      register: ct104_result
-      changed_when: "'CT104_DONE' in ct104_result.stdout"
-      tags: ct104
+      register: r
+      changed_when: "'CT101_DONE' in r.stdout"
 
-    # =========================================================
-    # CT113 — cloudflared
-    # =========================================================
-    - name: CT113 cloudflared — install and configure tunnel
+    - name: CT101 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Restore /var/lib/sonarr from PBS backup (preserves series, history, settings)"
+          - "2. Verify NAS mounts: /mnt/nas/Media and /mnt/nas/Expanded"
+          - "3. Check root folders in Sonarr UI at http://192.168.55.101:8989"
+          - "4. Reconnect Prowlarr indexers and SABnzbd download client"
+          - "5. API key is in Sonarr Settings > General (update KB and n8n credentials)"
+
+---
+# CT102 — Radarr (Movie Management)
+# OS: Debian 12, 2 cores, 1GB RAM, 4GB root (tank-storage)
+# NAS mounts: same as CT101
+# Port: 7878
+# Features: keyctl=1,nesting=1
+#
+# PRE-START:
+#   pct set 102 --mp0 /mnt/pve/nas/Expanded,mp=/mnt/nas/Expanded
+#   pct set 102 --mp1 /mnt/pve/nas/Media,mp=/mnt/nas/Media
+#   pct set 102 --mp2 /mnt/pve/nas/Work,mp=/mnt/nas/Work
+#   pct set 102 --mp3 /mnt/pve/nas/Workspace,mp=/mnt/nas/Workspace
+#   pct set 102 --features keyctl=1,nesting=1
+
+- name: CT102 — Radarr
+  hosts: pve
+  become: false
+  tags: ct102
+  tasks:
+    - name: CT102 — Install Radarr
+      ansible.builtin.shell: |
+        pct exec 102 -- bash -c "
+          apt-get update -qq
+          apt-get install -y curl sqlite3
+          curl -fsSL https://repo.radarr.video/keys/radarr.asc | gpg --dearmor -o /usr/share/keyrings/radarr.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/radarr.gpg] https://repo.radarr.video/ stable main' > /etc/apt/sources.list.d/radarr.list
+          apt-get update -qq
+          apt-get install -y radarr
+          systemctl enable radarr
+          systemctl start radarr
+          echo CT102_DONE
+        "
+      register: r
+      changed_when: "'CT102_DONE' in r.stdout"
+
+    - name: CT102 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Restore /var/lib/radarr from PBS backup"
+          - "2. Verify root folders point to /mnt/nas/Media/Movies and /mnt/nas/Expanded/Movies"
+          - "3. Reconnect Prowlarr and SABnzbd"
+          - "4. API key in Radarr Settings > General"
+
+---
+# CT103 — AdGuard Home / Pi-hole (DNS)
+# OS: Debian 12, 3 cores, 1GB RAM, 4GB root (tank-storage)
+# No NAS mounts
+# Ports: 53 (DNS), 3000 (admin UI)
+# Also has: tailscale, unbound
+# Features: keyctl=1,nesting=1
+# NOTE: Router DHCP must point to 192.168.55.103 for DNS after rebuild
+
+- name: CT103 — AdGuard Home
+  hosts: pve
+  become: false
+  tags: ct103
+  tasks:
+    - name: CT103 — Install AdGuard Home
+      ansible.builtin.shell: |
+        pct exec 103 -- bash -c "
+          apt-get update -qq
+          apt-get install -y curl unbound
+          curl -fsSL https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -v
+          systemctl enable AdGuardHome
+          systemctl start AdGuardHome
+          echo CT103_DONE
+        "
+      register: r
+      changed_when: "'CT103_DONE' in r.stdout"
+
+    - name: CT103 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Restore /opt/AdGuardHome/AdGuardHome.yaml from PBS backup (blocklists, rules)"
+          - "2. AdGuard admin UI: http://192.168.55.103:3000"
+          - "3. Update router DHCP to use 192.168.55.103 as DNS server"
+          - "4. Reinstall Tailscale: curl -fsSL https://tailscale.com/install.sh | sh"
+          - "5. Reconnect Tailscale: tailscale up"
+
+---
+# CT105 — Prowlarr (Indexer Management)
+# OS: Debian 12, 2 cores, 1GB RAM, 4GB root (tank-storage)
+# No NAS mounts
+# Port: 9696
+# Features: keyctl=1,nesting=1
+# Connects to: Sonarr (CT101), Radarr (CT102), SABnzbd (CT110)
+
+- name: CT105 — Prowlarr
+  hosts: pve
+  become: false
+  tags: ct105
+  tasks:
+    - name: CT105 — Install Prowlarr
+      ansible.builtin.shell: |
+        pct exec 105 -- bash -c "
+          apt-get update -qq
+          apt-get install -y curl sqlite3
+          curl -fsSL https://repo.prowlarr.com/keys/prowlarr.asc | gpg --dearmor -o /usr/share/keyrings/prowlarr.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/prowlarr.gpg] https://repo.prowlarr.com/ stable main' > /etc/apt/sources.list.d/prowlarr.list
+          apt-get update -qq
+          apt-get install -y prowlarr
+          systemctl enable prowlarr
+          systemctl start prowlarr
+          echo CT105_DONE
+        "
+      register: r
+      changed_when: "'CT105_DONE' in r.stdout"
+
+    - name: CT105 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Restore /var/lib/prowlarr from PBS backup (8 indexers configured)"
+          - "2. Indexers: DrunkenSlug, Nzb.su, NZBgeek, NzbPlanet, omgwtfnzbs, Tabula Rasa, TorrentLeech, Usenet-Crawler"
+          - "3. Reconnect apps: Sonarr (192.168.55.101:8989), Radarr (192.168.55.102:7878)"
+          - "4. Reconnect SABnzbd (192.168.55.110:7777) as download client"
+
+---
+# CT106 — Proxmox Backup Server (PBS)
+# OS: Debian 12, 2 cores, 1GB RAM, 10GB root (tank-storage)
+# CRITICAL: Restore this FIRST before all other containers
+# NAS mount: /mnt/pve/nas/Work/PBS-Datastore -> /mnt/pbs-datastore
+# Features: nesting=1,fuse=1
+# Port: 8007 (HTTPS)
+# Schedule: Daily 4am, keep-last=7 keep-weekly=4
+#
+# PRE-START:
+#   pct set 106 --mp0 /mnt/pve/nas/Work/PBS-Datastore,mp=/mnt/pbs-datastore
+#   pct set 106 --features nesting=1,fuse=1
+
+- name: CT106 — Proxmox Backup Server
+  hosts: pve
+  become: false
+  tags: ct106
+  tasks:
+    - name: CT106 — Install PBS
+      ansible.builtin.shell: |
+        pct exec 106 -- bash -c "
+          apt-get update -qq
+          # Add PBS repo (Debian-based official)
+          echo 'deb http://download.proxmox.com/debian/pbs bookworm pbs-no-subscription' > /etc/apt/sources.list.d/pbs.list
+          curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg
+          apt-get update -qq
+          apt-get install -y proxmox-backup-server
+          systemctl enable proxmox-backup-server
+          systemctl start proxmox-backup-server
+          echo CT106_DONE
+        "
+      register: r
+      changed_when: "'CT106_DONE' in r.stdout"
+
+    - name: CT106 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "CRITICAL — RESTORE PBS FIRST"
+          - "1. PBS UI at https://192.168.55.106:8007"
+          - "2. Add datastore pointing to /mnt/pbs-datastore (QNAP NAS)"
+          - "3. Configure Proxmox host to use this PBS as backup target"
+          - "4. Schedule: daily 4am, keep-last=7, keep-weekly=4"
+          - "5. Once PBS is configured, restore all other containers from backup"
+
+---
+# CT110 — SABnzbd (Usenet Downloader)
+# OS: Debian 12, 4 cores, 2GB RAM, 8GB root (tank-storage)
+# NAS mounts: same as CT100/101/102
+# Port: 7777
+# Extra packages: par2, unrar, p7zip-full (post-processing)
+#
+# PRE-START:
+#   pct set 110 --mp0 /mnt/pve/nas/Expanded,mp=/mnt/nas/Expanded
+#   pct set 110 --mp1 /mnt/pve/nas/Media,mp=/mnt/nas/Media
+#   pct set 110 --mp2 /mnt/pve/nas/Work,mp=/mnt/nas/Work
+#   pct set 110 --mp3 /mnt/pve/nas/Workspace,mp=/mnt/nas/Workspace
+#   pct set 110 --features nesting=1
+
+- name: CT110 — SABnzbd
+  hosts: pve
+  become: false
+  tags: ct110
+  tasks:
+    - name: CT110 — Install SABnzbd and post-processing tools
+      ansible.builtin.shell: |
+        pct exec 110 -- bash -c "
+          apt-get update -qq
+          apt-get install -y par2 unrar p7zip-full python3 python3-pip git
+          # Install SABnzbd via pip
+          pip3 install sabnzbd --break-system-packages
+          # Or via apt if available
+          apt-get install -y sabnzbd 2>/dev/null || true
+          systemctl enable sabnzbd 2>/dev/null || true
+          systemctl start sabnzbd 2>/dev/null || true
+          echo CT110_DONE
+        "
+      register: r
+      changed_when: "'CT110_DONE' in r.stdout"
+
+    - name: CT110 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Restore SABnzbd config from PBS backup (/home/sabnzbd/.sabnzbd/)"
+          - "2. UI at http://192.168.55.110:7777"
+          - "3. Usenet provider credentials in Vaultwarden"
+          - "4. Download paths should point to /mnt/nas/ folders"
+          - "5. NOTE: SABnzbd was given 2GB RAM after OOM incident — keep at minimum 2GB"
+          - "6. Watch for par2 stuck loop (CPU 200%+) — kill par2 process if seen"
+
+---
+# CT113 — Cloudflared (Tunnel)
+# OS: Debian 12, 2 cores, 512MB RAM, 2GB root (tank-storage)
+# CRITICAL: Must be restored for all sevenbirches.co.uk domains to work
+# Tunnel ID: dcc88300-9517-4e1a-b5a4-103397ba6779
+# Config: /etc/cloudflared/config.yml (NOT /root/.cloudflared/)
+# Features: keyctl=1,nesting=1
+# IMPORTANT: VPS cloudflared-resilience must stay STOPPED to avoid 404 lottery
+
+- name: CT113 — Cloudflared
+  hosts: pve
+  become: false
+  tags: ct113
+  tasks:
+    - name: CT113 — Install cloudflared
       ansible.builtin.shell: |
         pct exec 113 -- bash -c "
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
-          dpkg -i /tmp/cloudflared.deb
-          mkdir -p /etc/cloudflared /root/.cloudflared
-          # NOTE: Restore config.yml and tunnel credentials from CT142 backup
-          # Tunnel ID: dcc88300-9517-4e1a-b5a4-103397ba6779
-          # config.yml location: /etc/cloudflared/config.yml (NOT /root/.cloudflared)
-          cloudflared service install
-          systemctl enable cloudflared
+          apt-get update -qq
+          curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | gpg --dearmor -o /usr/share/keyrings/cloudflare-main.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared bookworm main' > /etc/apt/sources.list.d/cloudflared.list
+          apt-get update -qq
+          apt-get install -y cloudflared
           echo CT113_DONE
         "
-      register: ct113_result
-      changed_when: "'CT113_DONE' in ct113_result.stdout"
-      tags: ct113
+      register: r
+      changed_when: "'CT113_DONE' in r.stdout"
 
-    # =========================================================
-    # CT116 — n8n
-    # =========================================================
-    - name: CT116 n8n — install Docker and n8n
+    - name: CT113 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "CRITICAL MANUAL STEPS:"
+          - "1. Restore tunnel credentials from CT142 credential inventory:"
+          - "   /etc/cloudflared/dcc88300-9517-4e1a-b5a4-103397ba6779.json"
+          - "2. Restore config from CT142 or KB:"
+          - "   /etc/cloudflared/config.yml (NOT /root/.cloudflared/)"
+          - "3. Install as service: cloudflared service install"
+          - "4. systemctl enable cloudflared && systemctl start cloudflared"
+          - "5. Verify all 32 hostnames resolve via: cloudflared tunnel info"
+          - "6. DO NOT start cloudflared-resilience on ihostart VPS"
+
+---
+# CT116 — n8n (Workflow Automation)
+# OS: Debian 12, 2 cores, 4GB RAM, 6GB root (tank-storage)
+# Port: 5678
+# Has: nodejs, graphicsmagick, build-essential
+# 12 active workflows, execution pruning enabled
+# Features: keyctl=1,nesting=1
+
+- name: CT116 — n8n
+  hosts: pve
+  become: false
+  tags: ct116
+  tasks:
+    - name: CT116 — Install Node.js and n8n
       ansible.builtin.shell: |
         pct exec 116 -- bash -c "
-          curl -fsSL https://get.docker.com | sh
-          mkdir -p /opt/n8n
-          cat > /opt/n8n/docker-compose.yml << 'EOF'
-          version: '3'
-          services:
-            n8n:
-              image: n8nio/n8n:latest
-              restart: unless-stopped
-              ports:
-                - '5678:5678'
-              volumes:
-                - n8n_data:/home/node/.n8n
-              environment:
-                - N8N_BASIC_AUTH_ACTIVE=true
-                - EXECUTIONS_DATA_PRUNE=true
-                - EXECUTIONS_DATA_MAX_AGE=7
-                - EXECUTIONS_DATA_PRUNE_MAX_COUNT=1000
-          volumes:
-            n8n_data:
+          apt-get update -qq
+          apt-get install -y curl gnupg2 graphicsmagick build-essential
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+          npm install -g n8n
+          # Create systemd service
+          cat > /etc/systemd/system/n8n.service << 'EOF'
+          [Unit]
+          Description=n8n workflow automation
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          Environment=N8N_BASIC_AUTH_ACTIVE=true
+          Environment=EXECUTIONS_DATA_PRUNE=true
+          Environment=EXECUTIONS_DATA_MAX_AGE=7
+          Environment=EXECUTIONS_DATA_PRUNE_MAX_COUNT=1000
+          ExecStart=/usr/bin/n8n start
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
           EOF
-          cd /opt/n8n && docker compose up -d
+          systemctl daemon-reload
+          systemctl enable n8n
+          systemctl start n8n
           echo CT116_DONE
         "
-      register: ct116_result
-      changed_when: "'CT116_DONE' in ct116_result.stdout"
-      tags: ct116
+      register: r
+      changed_when: "'CT116_DONE' in r.stdout"
 
-    # =========================================================
-    # CT120 — Docker host (Sablier stack)
-    # =========================================================
-    - name: CT120 docker — install Docker
+    - name: CT116 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Restore n8n data from PBS backup (/root/.n8n/)"
+          - "2. This restores all 12 workflows, credentials and settings"
+          - "3. Update SSH credentials in n8n to point at CT141 (192.168.55.141)"
+          - "   and VM151 (192.168.55.151)"
+          - "4. Reactivate webhook-triggered workflows after restore"
+          - "5. RAM: keep at minimum 4GB (upgraded from 2GB after OOM)"
+          - "6. n8n MCP URL: https://n8n.sevenbirches.co.uk/mcp-server/http"
+
+---
+# CT120 — Docker Host
+# OS: Debian 12, 4 cores, 5GB RAM, 85GB root (tank-storage)
+# NAS mounts: all four NAS shares
+# Has: Docker, docker-compose, nodejs, ffmpeg, tailscale
+# Features: nesting=1 (keyctl NOT listed but Docker needs it — add if issues)
+# Services: Pierre job agent (8585), whisper-web (9000), changedetection (5000)
+#           Sablier stack at /opt/sablier/, standalone at /root/service/
+#
+# PRE-START:
+#   pct set 120 --mp0 /mnt/pve/nas/Expanded,mp=/mnt/nas/Expanded
+#   pct set 120 --mp1 /mnt/pve/nas/Media,mp=/mnt/nas/Media
+#   pct set 120 --mp2 /mnt/pve/nas/Work,mp=/mnt/nas/Work
+#   pct set 120 --mp3 /mnt/pve/nas/Workspace,mp=/mnt/nas/Workspace
+#   pct set 120 --features nesting=1
+
+- name: CT120 — Docker Host
+  hosts: pve
+  become: false
+  tags: ct120
+  tasks:
+    - name: CT120 — Install Docker and dependencies
       ansible.builtin.shell: |
         pct exec 120 -- bash -c "
           apt-get update -qq
+          apt-get install -y curl gnupg git ffmpeg nodejs unzip
           curl -fsSL https://get.docker.com | sh
-          # Restore docker-compose files from vps-config-backup GitHub repo
-          # Sablier stack: /opt/sablier/docker-compose.yml
-          # Standalone services: /root/service/
-          # IMPORTANT: restore volumes from PBS backup for persistent data
+          systemctl enable docker
+          systemctl start docker
           echo CT120_DONE
         "
-      register: ct120_result
-      changed_when: "'CT120_DONE' in ct120_result.stdout"
-      tags: ct120
+      register: r
+      changed_when: "'CT120_DONE' in r.stdout"
 
-    # =========================================================
-    # CT141 — OSINT lab
-    # =========================================================
-    - name: CT141 osint-lab — install tools and dashboard
+    - name: CT120 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Clone vps-config-backup (private) from GitHub for compose files"
+          - "2. Sablier stack: /opt/sablier/docker-compose.yml"
+          - "3. Standalone services: /root/service/ (pierre-job-agent, whisper-web etc)"
+          - "4. Restore Docker volumes from PBS backup for persistent data"
+          - "5. Weekly image prune cron: 0 3 * * 0 docker image prune -f"
+          - "6. Watchtower runs every 24h with WATCHTOWER_CLEANUP=true"
+          - "7. Locally built images need label: com.centurylinklabs.watchtower.enable=false"
+          - "8. Install Tailscale: curl -fsSL https://tailscale.com/install.sh | sh"
+
+---
+# CT130 — Vaultwarden (Password Manager)
+# OS: Debian 12, 4 cores, 1GB RAM, 6GB root (tank-storage)
+# Port: 8000
+# Has: argon2, build-essential, git, pkgconf
+# Signups disabled, TOTP enabled
+# Features: keyctl=1,nesting=1
+# CRITICAL: Data directory contains all passwords — restore from PBS first
+
+- name: CT130 — Vaultwarden
+  hosts: pve
+  become: false
+  tags: ct130
+  tasks:
+    - name: CT130 — Install Vaultwarden
+      ansible.builtin.shell: |
+        pct exec 130 -- bash -c "
+          apt-get update -qq
+          apt-get install -y curl argon2 git pkgconf build-essential
+          # Use Alpine Docker image to extract binary (statically linked)
+          apt-get install -y docker.io 2>/dev/null || true
+          docker pull vaultwarden/server:latest-alpine 2>/dev/null || true
+          # Extract binary
+          docker create --name vw_extract vaultwarden/server:latest-alpine 2>/dev/null || true
+          docker cp vw_extract:/vaultwarden /usr/local/bin/vaultwarden 2>/dev/null || true
+          docker rm vw_extract 2>/dev/null || true
+          chmod +x /usr/local/bin/vaultwarden
+          echo CT130_DONE
+        "
+      register: r
+      changed_when: "'CT130_DONE' in r.stdout"
+
+    - name: CT130 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "CRITICAL — restore data before starting service"
+          - "1. Restore /var/lib/vaultwarden/ from PBS backup (contains all vault data)"
+          - "2. Restore systemd unit and .env config"
+          - "3. Signups disabled: SIGNUPS_ALLOWED=false in config"
+          - "4. TOTP authenticator enabled — will need re-setup after restore"
+          - "5. bw CLI requires Node 20+ for WASM crypto"
+          - "6. Run bw sync before any batch edits"
+
+---
+# CT141 — OSINT Lab
+# OS: Ubuntu 22.04, 2 cores, 4GB RAM, 30GB root (tank-storage)
+# Ports: 8000 (FastAPI), 7681 (ttyd), 5001 (SpiderFoot)
+# Has: google-chrome-stable, xvfb, nmap, nodejs, python3, git
+# i-bidder scraper at /opt/ibidder/ (requires DEEPSEEK_API_KEY in /root/.env)
+# WAF cookie auto-refresh via headless Chrome
+# Features: nesting=1
+
+- name: CT141 — OSINT Lab
+  hosts: pve
+  become: false
+  tags: ct141
+  tasks:
+    - name: CT141 — Install base tools
       ansible.builtin.shell: |
         pct exec 141 -- bash -c "
           apt-get update -qq
-          apt-get install -y python3 python3-pip git curl chromium
-          git clone git@github.com:mrapierre/osint-dashboard.git /opt/osint
-          cd /opt/osint && pip3 install -r requirements.txt --break-system-packages
-          # i-bidder scraper
-          mkdir -p /opt/ibidder
-          # Restore scraper files from PBS backup
-          # Restore /root/.env with DEEPSEEK_API_KEY
+          apt-get install -y curl git python3 python3-pip python3-venv \
+            nmap xvfb nodejs whois dnsutils sqlite3 unzip
+          # Install Google Chrome (required for i-bidder WAF bypass)
+          curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
+          apt-get install -y /tmp/chrome.deb || apt-get install -f -y
+          # Install ttyd for terminal access
+          curl -fsSL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o /usr/local/bin/ttyd
+          chmod +x /usr/local/bin/ttyd
+          # Clone OSINT dashboard
+          git clone git@github.com:mrapierre/osint-dashboard.git /opt/osint 2>/dev/null || true
+          cd /opt/osint && pip3 install -r requirements.txt --break-system-packages 2>/dev/null || true
           echo CT141_DONE
         "
-      register: ct141_result
-      changed_when: "'CT141_DONE' in ct141_result.stdout"
-      tags: ct141
+      register: r
+      changed_when: "'CT141_DONE' in r.stdout"
 
-    # =========================================================
-    # CT151/VM151 — homelab-agent
-    # =========================================================
-    - name: VM151 homelab-agent — install and configure
-      ansible.builtin.shell: |
-        ssh root@192.168.55.151 "
-          apt-get update -qq
-          apt-get install -y python3 python3-pip python3-venv git sqlite3
-          git clone git@github.com:mrapierre/homelab-agent.git /opt/homelab-agent
-          cd /opt/homelab-agent
-          python3 -m venv venv
-          venv/bin/pip install -r requirements.txt
-          # Restore knowledge.db from PBS backup
-          # Install systemd service
-          cp homelab-api.service /etc/systemd/system/
-          systemctl enable homelab-api
-          systemctl start homelab-api
-          echo VM151_DONE
-        "
-      register: vm151_result
-      changed_when: "'VM151_DONE' in vm151_result.stdout"
-      tags: vm151
-
-    - name: Show post-rebuild manual steps
+    - name: CT141 — Manual steps
       ansible.builtin.debug:
         msg:
-          - "========================================="
-          - "MANUAL STEPS REQUIRED AFTER THIS PLAYBOOK"
-          - "========================================="
-          - "1. CT113: Copy tunnel credentials JSON from CT142 backup to /etc/cloudflared/"
-          - "2. CT113: Copy config.yml from CT142 backup to /etc/cloudflared/config.yml"
-          - "3. CT116: Restore n8n workflows from PBS backup volume"
-          - "4. CT120: Restore Docker volumes from PBS backup"
-          - "5. CT130: Restore Vaultwarden data from PBS backup"
-          - "6. CT142: Restore credential inventory from PBS backup (PRIORITY)"
-          - "7. VM151: Restore knowledge.db from PBS backup"
-          - "8. All:   Run harden_servers.yml after rebuild complete"
-          - "9. DNS:   Verify Cloudflare DNS records still point correctly"
-          - "10. PBS:  Reconfigure daily backup job after CT106 restore"
+          - "1. Restore /opt/ibidder/ from PBS backup (scraper, config, cookies)"
+          - "2. Restore /root/.env with DEEPSEEK_API_KEY"
+          - "3. i-bidder WAF: refresh_cookie.py runs headless Chrome 148 stealth"
+          - "4. Cron jobs: 0 7 * * * and 0 19 * * * /opt/ibidder/cron_run.sh"
+          - "5. n8n SSH credential must point to this container (192.168.55.141)"
+          - "6. SpiderFoot on port 5001, osint-dashboard on 8000, ttyd on 7681"
+          - "7. Deploy key for osint-dashboard: ct141-osint-dashboard at /root/.ssh/"
+
+---
+# CT142 — Private Docs (Credential Store)
+# OS: Debian 12, 1 core, 512MB RAM, 4GB root (tank-storage)
+# Has: hugo, nginx, git
+# WireGuard-only access (not in Cloudflare tunnel)
+# RESTORE THIS EARLY — contains all credentials needed for other rebuilds
+# Features: nesting=1
+
+- name: CT142 — Private Docs
+  hosts: pve
+  become: false
+  tags: ct142
+  tasks:
+    - name: CT142 — Install Hugo and nginx
+      ansible.builtin.shell: |
+        pct exec 142 -- bash -c "
+          apt-get update -qq
+          apt-get install -y hugo nginx git curl
+          # Clone private-docs repo (requires deploy key)
+          # git clone git@github.com:mrapierre/private-docs.git /opt/private-docs
+          echo CT142_DONE
+        "
+      register: r
+      changed_when: "'CT142_DONE' in r.stdout"
+
+    - name: CT142 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "RESTORE EARLY — contains all credentials"
+          - "1. Restore /opt/private-docs/ from PBS backup"
+          - "2. credential-inventory.md has ALL service passwords and tokens"
+          - "3. WireGuard-only access — not publicly reachable"
+          - "4. Hugo renders private docs site via nginx"
+          - "5. Restore SSH deploy keys for private GitHub repos"
+
+---
+# CT145 — Kali Lab (Security Testing)
+# OS: Kali Linux (Debian-based), 2 cores, 2GB RAM, 20GB root (tank-storage)
+# Has: metasploit-framework, nmap, nikto, hydra, john, sqlmap, wireshark,
+#      dirb, exploitdb, tmux, ffmpeg
+# Also on vmbr99 isolated network (10.99.0.0/24) for lab targeting
+# Metasploitable2 target: VM146 at 10.99.0.10
+# Features: nesting=1
+#
+# PRE-START:
+#   pct set 145 --net1 name=eth1,bridge=vmbr99,ip=10.99.0.2/24
+
+- name: CT145 — Kali Lab
+  hosts: pve
+  become: false
+  tags: ct145
+  tasks:
+    - name: CT145 — Install Kali tools
+      ansible.builtin.shell: |
+        pct exec 145 -- bash -c "
+          # Add Kali repo
+          echo 'deb http://http.kali.org/kali kali-rolling main non-free contrib' > /etc/apt/sources.list
+          curl -fsSL https://archive.kali.org/archive-key.asc | gpg --dearmor -o /usr/share/keyrings/kali-archive-keyring.gpg
+          apt-get update -qq
+          apt-get install -y \
+            metasploit-framework nmap nikto hydra john sqlmap \
+            wireshark dirb exploitdb tmux ffmpeg netcat-traditional \
+            netcat-openbsd net-tools curl git python3 python3-pip
+          # Init Metasploit DB
+          msfdb init 2>/dev/null || true
+          echo CT145_DONE
+        "
+      register: r
+      changed_when: "'CT145_DONE' in r.stdout"
+
+    - name: CT145 — Manual steps
+      ansible.builtin.debug:
+        msg:
+          - "1. Kali uses kali-rolling repo — packages may differ from original"
+          - "2. Add isolated network: pct set 145 --net1 name=eth1,bridge=vmbr99,ip=10.99.0.2/24"
+          - "3. Run msfdb init to initialise Metasploit database"
+          - "4. Metasploitable2 target at 10.99.0.10 (VM146) on isolated vmbr99"
+          - "5. Never inline comments in Metasploit set commands"
+          - "6. tmux session recommended for long running exploits"
