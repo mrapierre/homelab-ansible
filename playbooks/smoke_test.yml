@@ -1,0 +1,90 @@
+---
+# smoke_test.yml -- Sevenbirches Homelab Pre-flight Sanity Check
+# Run: ansible-playbook playbooks/smoke_test.yml --tags smoke
+# Dry-run: ansible-playbook playbooks/smoke_test.yml --check --tags smoke
+
+- name: Homelab Smoke Test
+  hosts: proxmox_host
+  gather_facts: true
+  tags: smoke
+
+  vars:
+    proxmox_api_url: "https://192.168.55.10:8006"
+    cf_tunnel_url: "https://metrics.sevenbirches.co.uk/health"
+    internal_dns_host: "n8n.sevenbirches.co.uk"
+
+  tasks:
+    - name: SMOKE | Show discovered default gateway
+      debug:
+        msg: "Default gateway is {{ ansible_facts['default_ipv4']['gateway'] }}"
+      tags: smoke
+
+    - name: SMOKE | Ping default gateway
+      command: ping -c 2 -W 2 {{ ansible_facts['default_ipv4']['gateway'] }}
+      changed_when: false
+      register: ping_result
+      tags: smoke
+
+    - name: SMOKE | Assert gateway reachable
+      assert:
+        that: ping_result.rc == 0
+        fail_msg: "Gateway {{ ansible_facts['default_ipv4']['gateway'] }} not reachable"
+        success_msg: "Gateway {{ ansible_facts['default_ipv4']['gateway'] }} OK"
+      tags: smoke
+
+    - name: SMOKE | Resolve internal DNS hostname
+      command: getent hosts {{ internal_dns_host }}
+      changed_when: false
+      register: dns_result
+      tags: smoke
+
+    - name: SMOKE | Assert DNS resolving
+      assert:
+        that: dns_result.rc == 0
+        fail_msg: "DNS resolution failed for {{ internal_dns_host }}"
+        success_msg: "DNS OK"
+      tags: smoke
+
+    - name: SMOKE | Check Proxmox API
+      uri:
+        url: "{{ proxmox_api_url }}"
+        method: GET
+        validate_certs: false
+        status_code: [200, 401, 403]
+        timeout: 10
+      register: proxmox_check
+      tags: smoke
+
+    - name: SMOKE | Assert Proxmox API reachable
+      assert:
+        that: proxmox_check.status in [200, 401, 403]
+        fail_msg: "Proxmox API not responding at {{ proxmox_api_url }}"
+        success_msg: "Proxmox API OK (HTTP {{ proxmox_check.status }})"
+      tags: smoke
+
+    - name: SMOKE | Check Cloudflare tunnel
+      uri:
+        url: "{{ cf_tunnel_url }}"
+        method: GET
+        status_code: [200, 204]
+        timeout: 15
+      register: cf_check
+      ignore_errors: true
+      tags: smoke
+
+    - name: SMOKE | Assert Cloudflare tunnel alive
+      assert:
+        that: cf_check.status in [200, 204]
+        fail_msg: "CF tunnel down - check cloudflared on CT113. Got {{ cf_check.status | default('no response') }}"
+        success_msg: "Cloudflare tunnel OK (HTTP {{ cf_check.status }})"
+      tags: smoke
+
+    - name: SMOKE | Summary
+      debug:
+        msg:
+          - "===== SMOKE TEST PASSED ====="
+          - "Gateway : {{ ansible_facts['default_ipv4']['gateway'] }} reachable"
+          - "DNS     : {{ internal_dns_host }} resolves"
+          - "Proxmox : HTTP {{ proxmox_check.status }}"
+          - "CF Tunnel: HTTP {{ cf_check.status }}"
+      tags: smoke
