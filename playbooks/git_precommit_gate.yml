@@ -14,27 +14,14 @@
 #   ansible-playbook playbooks/git_precommit_gate.yml --tags lxc
 #   ansible-playbook playbooks/git_precommit_gate.yml --check --diff   (dry run)
 #
-# Two plays: LXC containers go through `pct exec` from the pve host (this
-# repo's established pattern for LXC -- see harden_containers.yml; the
-# community.proxmox.proxmox_pct_remote connection plugin has proven
-# unreliable here and is intentionally not used). VM151 is direct SSH, so it
-# uses the git_precommit_gate role with native Ansible modules instead.
-#
-# Hermes review (backlog #305/#306, 2026-07-15) found and this now fixes:
-# - CRITICAL: unescaped Jinja2 vars interpolated into shell -- every variable
-#   below is now passed through the `quote` filter before it reaches a shell
-#   string, closing the injection vector.
-# - HIGH: no integrity check on the downloaded gitleaks binary -- both the
-#   LXC and VM paths now verify against gitleaks' own published checksums
-#   file before the binary is ever used.
-# - HIGH: version check used an unsafe substring match -- now an exact,
-#   trimmed comparison.
-# - HIGH: repo-wiring failures were swallowed -- now failures exit non-zero
-#   and a final assertion catches any repo that didn't report success.
-# Deferred (see reviews/ansible-git-precommit-gate/ledger.json for reasoning
-# and sign-off status): unifying the LXC and VM code paths into one shared
-# task list -- a real architectural improvement, but a bigger refactor than
-# fits safely alongside the security fixes above in one pass.
+# Both plays now share ONE canonical installer (roles/git_precommit_gate/
+# files/install-git-hooks.sh, backlog #308 -- previously the LXC and VM
+# paths were two independent implementations). LXC containers go through
+# `pct exec` from the pve host (this repo's established pattern for LXC --
+# see harden_containers.yml; the community.proxmox.proxmox_pct_remote
+# connection plugin has proven unreliable here and is intentionally not
+# used) to push the script in and run it. VM151 is direct SSH, so the
+# git_precommit_gate role runs the same script directly.
 
 - name: Deploy git pre-commit/pre-push gate — LXC containers via pct exec
   hosts: pve
@@ -76,12 +63,13 @@
         state: directory
         mode: "0755"
 
-    - name: git-precommit-gate | stage role files on the Proxmox host
+    - name: git-precommit-gate | stage installer + support files on the Proxmox host
       ansible.builtin.copy:
         src: "{{ git_precommit_gate_files_dir }}/{{ item }}"
         dest: "/tmp/git-hooks-stage/{{ item }}"
-        mode: '0644'
+        mode: "{{ '0755' if item == 'install-git-hooks.sh' else '0644' }}"
       loop:
+        - install-git-hooks.sh
         - gitleaks.toml
         - pre-commit-gitleaks.sh
         - pre-push-gitleaks.sh
@@ -97,62 +85,26 @@
       loop_control:
         label: "CT{{ item.key }}"
 
-    - name: git-precommit-gate | install + wire the gate in each running target container
+    - name: git-precommit-gate | push files and run the canonical installer in each running container
       ansible.builtin.shell:
         cmd: |
           set -eu
           VMID={{ item.item.key | quote }}
           USER={{ item.item.value.user | quote }}
-          GLVER={{ git_precommit_gate_gitleaks_version | quote }}
+          REPOS={{ item.item.value.repos | join(' ') | quote }}
 
-          pct exec "$VMID" -- mkdir -p /opt/git-hooks/bin /opt/git-hooks/lib /opt/git-hooks/hooks /opt/git-hooks/template/hooks
+          pct exec "$VMID" -- mkdir -p /tmp/git-hooks-stage
+          for f in install-git-hooks.sh gitleaks.toml pre-commit-gitleaks.sh pre-push-gitleaks.sh pre-commit pre-push; do
+            pct push "$VMID" "/tmp/git-hooks-stage/$f" "/tmp/git-hooks-stage/$f"
+          done
+          pct exec "$VMID" -- chmod +x /tmp/git-hooks-stage/install-git-hooks.sh
 
-          # Exact version comparison (Hermes F4) -- trim, don't substring-match.
-          INSTALLED=$(pct exec "$VMID" -- /opt/git-hooks/bin/gitleaks version 2>/dev/null | tr -d '[:space:]' || true)
-          if [ "$INSTALLED" != "$GLVER" ]; then
-            pct exec "$VMID" -- bash -c "
-              set -eu
-              cd /tmp
-              curl -fsSL -o gitleaks_${GLVER}_linux_x64.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v${GLVER}/gitleaks_${GLVER}_linux_x64.tar.gz
-              curl -fsSL -o gitleaks_${GLVER}_checksums.txt https://github.com/gitleaks/gitleaks/releases/download/v${GLVER}/gitleaks_${GLVER}_checksums.txt
-              grep 'gitleaks_${GLVER}_linux_x64.tar.gz' gitleaks_${GLVER}_checksums.txt | sha256sum -c -
-              tar xzf gitleaks_${GLVER}_linux_x64.tar.gz gitleaks
-              mv gitleaks /opt/git-hooks/bin/gitleaks
-              chmod +x /opt/git-hooks/bin/gitleaks
-              rm -f gitleaks_${GLVER}_linux_x64.tar.gz gitleaks_${GLVER}_checksums.txt
-            "
-            echo "CT$VMID: gitleaks installed and checksum-verified ($GLVER)"
-          else
-            echo "CT$VMID: gitleaks already at $GLVER"
-          fi
-
-          pct push "$VMID" /tmp/git-hooks-stage/gitleaks.toml /opt/git-hooks/gitleaks.toml
-          pct push "$VMID" /tmp/git-hooks-stage/pre-commit-gitleaks.sh /opt/git-hooks/lib/pre-commit-gitleaks.sh
-          pct push "$VMID" /tmp/git-hooks-stage/pre-push-gitleaks.sh /opt/git-hooks/lib/pre-push-gitleaks.sh
-          pct push "$VMID" /tmp/git-hooks-stage/pre-commit /opt/git-hooks/hooks/pre-commit
-          pct push "$VMID" /tmp/git-hooks-stage/pre-push /opt/git-hooks/hooks/pre-push
-          pct push "$VMID" /tmp/git-hooks-stage/pre-commit /opt/git-hooks/template/hooks/pre-commit
-          pct push "$VMID" /tmp/git-hooks-stage/pre-push /opt/git-hooks/template/hooks/pre-push
-
-          pct exec "$VMID" -- chmod +x /opt/git-hooks/lib/pre-commit-gitleaks.sh /opt/git-hooks/lib/pre-push-gitleaks.sh \
-            /opt/git-hooks/hooks/pre-commit /opt/git-hooks/hooks/pre-push \
-            /opt/git-hooks/template/hooks/pre-commit /opt/git-hooks/template/hooks/pre-push
-          pct exec "$VMID" -- chmod -R a+rX /opt/git-hooks
-
-          pct exec "$VMID" -- su "$USER" -c "git config --global init.templateDir /opt/git-hooks/template"
-
-          {% for repo in item.item.value.repos %}
-          REPO={{ repo | quote }}
-          pct exec "$VMID" -- su "$USER" -c "git config --global --add safe.directory '$REPO'"
-          if pct exec "$VMID" -- su "$USER" -c "cd '$REPO' && git config core.hooksPath /opt/git-hooks/hooks"; then
-            echo "CT$VMID: $REPO wired"
-          else
-            echo "CT$VMID: $REPO FAILED -- repo missing or $USER lacks access" >&2
-            exit 1
-          fi
-          {% endfor %}
-
-          echo "CT$VMID: done"
+          pct exec "$VMID" -- env \
+            GITLEAKS_VERSION={{ git_precommit_gate_gitleaks_version | quote }} \
+            TARGET_USER="$USER" \
+            FILES_DIR=/tmp/git-hooks-stage \
+            REPOS="$REPOS" \
+            /tmp/git-hooks-stage/install-git-hooks.sh
       loop: "{{ git_precommit_gate_lxc_status.results }}"
       loop_control:
         label: "CT{{ item.item.key }}"

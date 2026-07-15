@@ -1,127 +1,44 @@
 ---
-- name: git-precommit-gate | create shared hooks directory structure
+# Shared installer, single source of truth for both the LXC and VM
+# deployment paths (backlog #308 -- previously duplicated). This role now
+# just stages the canonical script + support files and invokes it; all the
+# actual install/verify/wire logic lives in install-git-hooks.sh.
+
+- name: git-precommit-gate | create staging directory
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: /opt/git-hooks-stage
     state: directory
     mode: '0755'
-  loop:
-    - /opt/git-hooks/bin
-    - /opt/git-hooks/lib
-    - /opt/git-hooks/hooks
-    - /opt/git-hooks/template/hooks
 
-- name: git-precommit-gate | check installed gitleaks version
-  ansible.builtin.command: /opt/git-hooks/bin/gitleaks version
-  register: git_precommit_gate_installed_version
-  failed_when: false
-  changed_when: false
-
-- name: git-precommit-gate | determine whether install/upgrade is needed
-  ansible.builtin.set_fact:
-    # Exact, trimmed comparison (Hermes F4) -- the previous "not in" substring
-    # check would falsely treat e.g. installed "8.30.10" as satisfying "8.30.1".
-    git_precommit_gate_needs_install: "{{ (git_precommit_gate_installed_version.stdout | default('') | trim) != git_precommit_gate_gitleaks_version }}"
-
-- name: git-precommit-gate | download gitleaks {{ git_precommit_gate_gitleaks_version }}
-  ansible.builtin.get_url:
-    url: "https://github.com/gitleaks/gitleaks/releases/download/v{{ git_precommit_gate_gitleaks_version }}/gitleaks_{{ git_precommit_gate_gitleaks_version }}_linux_x64.tar.gz"
-    dest: "/tmp/gitleaks-{{ git_precommit_gate_gitleaks_version }}.tar.gz"
-    mode: '0644'
-  when: git_precommit_gate_needs_install
-
-- name: git-precommit-gate | download gitleaks checksums (Hermes F3 -- verify before use)
-  ansible.builtin.get_url:
-    url: "https://github.com/gitleaks/gitleaks/releases/download/v{{ git_precommit_gate_gitleaks_version }}/gitleaks_{{ git_precommit_gate_gitleaks_version }}_checksums.txt"
-    dest: "/tmp/gitleaks-{{ git_precommit_gate_gitleaks_version }}-checksums.txt"
-    mode: '0644'
-  when: git_precommit_gate_needs_install
-
-- name: git-precommit-gate | verify downloaded tarball against published checksum
-  ansible.builtin.shell: |
-    set -eu
-    cd /tmp
-    grep "gitleaks_{{ git_precommit_gate_gitleaks_version }}_linux_x64.tar.gz$" \
-      "gitleaks-{{ git_precommit_gate_gitleaks_version }}-checksums.txt" | sha256sum -c -
-  changed_when: false
-  when: git_precommit_gate_needs_install
-
-- name: git-precommit-gate | extract gitleaks binary
-  ansible.builtin.unarchive:
-    src: "/tmp/gitleaks-{{ git_precommit_gate_gitleaks_version }}.tar.gz"
-    dest: /opt/git-hooks/bin
-    remote_src: true
-    include:
-      - gitleaks
-    mode: '0755'
-  when: git_precommit_gate_needs_install
-
-- name: git-precommit-gate | deploy shared gitleaks config
-  ansible.builtin.copy:
-    src: gitleaks.toml
-    dest: /opt/git-hooks/gitleaks.toml
-    mode: '0644'
-
-- name: git-precommit-gate | deploy canonical pre-commit scan script
-  ansible.builtin.copy:
-    src: pre-commit-gitleaks.sh
-    dest: /opt/git-hooks/lib/pre-commit-gitleaks.sh
-    mode: '0755'
-
-- name: git-precommit-gate | deploy canonical pre-push scan script
-  ansible.builtin.copy:
-    src: pre-push-gitleaks.sh
-    dest: /opt/git-hooks/lib/pre-push-gitleaks.sh
-    mode: '0755'
-
-- name: git-precommit-gate | deploy hook shims
+- name: git-precommit-gate | stage installer + support files
   ansible.builtin.copy:
     src: "{{ item }}"
-    dest: "/opt/git-hooks/hooks/{{ item }}"
-    mode: '0755'
+    dest: "/opt/git-hooks-stage/{{ item }}"
+    mode: "{{ '0755' if item == 'install-git-hooks.sh' else '0644' }}"
   loop:
+    - install-git-hooks.sh
+    - gitleaks.toml
+    - pre-commit-gitleaks.sh
+    - pre-push-gitleaks.sh
     - pre-commit
     - pre-push
 
-- name: git-precommit-gate | deploy template hook shims for future repos
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "/opt/git-hooks/template/hooks/{{ item }}"
-    mode: '0755'
-  loop:
-    - pre-commit
-    - pre-push
-
-- name: git-precommit-gate | ensure world-readable (repos may be owned by a non-root user, e.g. CT148's anthony)
-  ansible.builtin.file:
-    path: /opt/git-hooks
-    state: directory
-    recurse: true
-    mode: 'a+rX'
-
-- name: git-precommit-gate | set global init.templateDir so future repos get both hooks automatically
-  community.general.git_config:
-    name: init.templateDir
-    scope: global
-    value: /opt/git-hooks/template
-  become: true
-  become_user: "{{ git_precommit_gate_user }}"
-
-- name: git-precommit-gate | wire core.hooksPath on known existing repos
-  community.general.git_config:
-    name: core.hooksPath
-    scope: local
-    value: /opt/git-hooks/hooks
-    repo: "{{ item }}"
-  loop: "{{ git_precommit_gate_repos }}"
-  become: true
-  become_user: "{{ git_precommit_gate_user }}"
-  register: git_precommit_gate_wire_result
+- name: git-precommit-gate | run the canonical installer
+  ansible.builtin.command: /opt/git-hooks-stage/install-git-hooks.sh
+  environment:
+    GITLEAKS_VERSION: "{{ git_precommit_gate_gitleaks_version }}"
+    TARGET_USER: "{{ git_precommit_gate_user }}"
+    FILES_DIR: /opt/git-hooks-stage
+    REPOS: "{{ git_precommit_gate_repos | join(' ') }}"
+  register: git_precommit_gate_result
+  changed_when: "'installed and checksum-verified' in git_precommit_gate_result.stdout"
   failed_when: false
 
-- name: git-precommit-gate | fail loudly if any repo failed to wire (Hermes F5 -- no silent skips)
+- name: git-precommit-gate | fail loudly if the installer reported an error (Hermes F5)
   ansible.builtin.fail:
-    msg: "{{ item.item }} failed to wire core.hooksPath -- check the path exists and {{ git_precommit_gate_user }} can access it. {{ item.msg | default('') }}"
-  loop: "{{ git_precommit_gate_wire_result.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  when: item.failed | default(false)
+    msg: "Installer failed on this host -- {{ git_precommit_gate_result.stdout }} {{ git_precommit_gate_result.stderr }}"
+  when: git_precommit_gate_result.rc != 0
+
+- name: git-precommit-gate | result
+  ansible.builtin.debug:
+    msg: "{{ git_precommit_gate_result.stdout_lines }}"
