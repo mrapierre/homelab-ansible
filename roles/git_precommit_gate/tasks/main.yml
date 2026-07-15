@@ -1,9 +1,4 @@
 ---
-# Idempotent installer for the universal gitleaks pre-commit + pre-push gate
-# (homelab backlog #305/#306). Safe to re-run against a host that already has it.
-# Needs no credentials -- installing/wiring the gate itself is credential-free;
-# only pushing a brand-new repo up needs a token, which is out of this role's scope.
-
 - name: git-precommit-gate | create shared hooks directory structure
   ansible.builtin.file:
     path: "{{ item }}"
@@ -21,12 +16,34 @@
   failed_when: false
   changed_when: false
 
+- name: git-precommit-gate | determine whether install/upgrade is needed
+  ansible.builtin.set_fact:
+    # Exact, trimmed comparison (Hermes F4) -- the previous "not in" substring
+    # check would falsely treat e.g. installed "8.30.10" as satisfying "8.30.1".
+    git_precommit_gate_needs_install: "{{ (git_precommit_gate_installed_version.stdout | default('') | trim) != git_precommit_gate_gitleaks_version }}"
+
 - name: git-precommit-gate | download gitleaks {{ git_precommit_gate_gitleaks_version }}
   ansible.builtin.get_url:
     url: "https://github.com/gitleaks/gitleaks/releases/download/v{{ git_precommit_gate_gitleaks_version }}/gitleaks_{{ git_precommit_gate_gitleaks_version }}_linux_x64.tar.gz"
     dest: "/tmp/gitleaks-{{ git_precommit_gate_gitleaks_version }}.tar.gz"
     mode: '0644'
-  when: git_precommit_gate_gitleaks_version not in git_precommit_gate_installed_version.stdout
+  when: git_precommit_gate_needs_install
+
+- name: git-precommit-gate | download gitleaks checksums (Hermes F3 -- verify before use)
+  ansible.builtin.get_url:
+    url: "https://github.com/gitleaks/gitleaks/releases/download/v{{ git_precommit_gate_gitleaks_version }}/gitleaks_{{ git_precommit_gate_gitleaks_version }}_checksums.txt"
+    dest: "/tmp/gitleaks-{{ git_precommit_gate_gitleaks_version }}-checksums.txt"
+    mode: '0644'
+  when: git_precommit_gate_needs_install
+
+- name: git-precommit-gate | verify downloaded tarball against published checksum
+  ansible.builtin.shell: |
+    set -eu
+    cd /tmp
+    grep "gitleaks_{{ git_precommit_gate_gitleaks_version }}_linux_x64.tar.gz$" \
+      "gitleaks-{{ git_precommit_gate_gitleaks_version }}-checksums.txt" | sha256sum -c -
+  changed_when: false
+  when: git_precommit_gate_needs_install
 
 - name: git-precommit-gate | extract gitleaks binary
   ansible.builtin.unarchive:
@@ -36,7 +53,7 @@
     include:
       - gitleaks
     mode: '0755'
-  when: git_precommit_gate_gitleaks_version not in git_precommit_gate_installed_version.stdout
+  when: git_precommit_gate_needs_install
 
 - name: git-precommit-gate | deploy shared gitleaks config
   ansible.builtin.copy:
@@ -89,7 +106,6 @@
   become: true
   become_user: "{{ git_precommit_gate_user }}"
 
-
 - name: git-precommit-gate | wire core.hooksPath on known existing repos
   community.general.git_config:
     name: core.hooksPath
@@ -99,3 +115,13 @@
   loop: "{{ git_precommit_gate_repos }}"
   become: true
   become_user: "{{ git_precommit_gate_user }}"
+  register: git_precommit_gate_wire_result
+  failed_when: false
+
+- name: git-precommit-gate | fail loudly if any repo failed to wire (Hermes F5 -- no silent skips)
+  ansible.builtin.fail:
+    msg: "{{ item.item }} failed to wire core.hooksPath -- check the path exists and {{ git_precommit_gate_user }} can access it. {{ item.msg | default('') }}"
+  loop: "{{ git_precommit_gate_wire_result.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.failed | default(false)
