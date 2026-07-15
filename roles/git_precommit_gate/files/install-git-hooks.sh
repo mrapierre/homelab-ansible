@@ -6,17 +6,29 @@
 # (backlog #308 -- previously these were two separate implementations).
 #
 # Required env vars:
-#   GITLEAKS_VERSION   e.g. 8.30.1
-#   TARGET_USER        user to run `git config` as (root, anthony, ...)
-#   FILES_DIR          directory on THIS host containing gitleaks.toml,
-#                      pre-commit-gitleaks.sh, pre-push-gitleaks.sh,
-#                      pre-commit, pre-push (already staged before this runs)
+#   GITLEAKS_VERSION        e.g. 8.30.1
+#   GITLEAKS_CHECKSUMS_SHA256  the SHA256 of gitleaks' own published
+#                            checksums.txt for this version, pinned in our
+#                            own Ansible config (not fetched from GitHub) --
+#                            see backlog #305 follow-up F3. gitleaks doesn't
+#                            GPG-sign or cosign-attest their release
+#                            checksums file, so this pin is the practical
+#                            substitute: an attacker would need to
+#                            compromise the GitHub release asset AND get us
+#                            to deliberately re-pin a new hash, not just one
+#                            or the other.
+#   TARGET_USER              user to run `git config` as (root, anthony, ...)
+#   FILES_DIR                directory on THIS host containing gitleaks.toml,
+#                            pre-commit-gitleaks.sh, pre-push-gitleaks.sh,
+#                            pre-commit, pre-push (already staged before this
+#                            runs)
 # Optional:
-#   REPOS              space-separated absolute repo paths to wire
-#                      core.hooksPath for.
+#   REPOS                    space-separated absolute repo paths to wire
+#                            core.hooksPath for.
 set -eu -o pipefail
 
 : "${GITLEAKS_VERSION:?GITLEAKS_VERSION not set}"
+: "${GITLEAKS_CHECKSUMS_SHA256:?GITLEAKS_CHECKSUMS_SHA256 not set}"
 : "${TARGET_USER:?TARGET_USER not set}"
 : "${FILES_DIR:?FILES_DIR not set}"
 REPOS="${REPOS:-}"
@@ -37,11 +49,22 @@ if [ "$INSTALLED" != "$GITLEAKS_VERSION" ]; then
   curl -fsSL -o "$CHECKSUMS" \
     "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${CHECKSUMS}"
 
-  # Hermes finding (CRITICAL): the previous `grep ... | sha256sum -c -`
-  # pipeline could silently "pass" if grep found no matching line -- under
-  # plain `set -e` (no pipefail), a pipeline's exit status is only the LAST
-  # command's. `set -o pipefail` above plus separating the grep out makes
-  # the failure mode explicit either way.
+  # Hermes finding (MEDIUM, ansible-unify-lxc-vm review F3): verify the
+  # checksums FILE ITSELF against a hash pinned in our own Ansible config
+  # before trusting it to verify the tarball. gitleaks doesn't publish a
+  # signature for this file, so this pin is the practical substitute --
+  # closes the gap where an attacker compromising the GitHub release could
+  # otherwise swap the tarball and the checksums file together.
+  ACTUAL_CHECKSUMS_SHA256=$(sha256sum "$CHECKSUMS" | awk '{print $1}')
+  if [ "$ACTUAL_CHECKSUMS_SHA256" != "$GITLEAKS_CHECKSUMS_SHA256" ]; then
+    echo "FATAL: gitleaks_${GITLEAKS_VERSION}_checksums.txt does not match the pinned hash." >&2
+    echo "  expected: $GITLEAKS_CHECKSUMS_SHA256" >&2
+    echo "  got:      $ACTUAL_CHECKSUMS_SHA256" >&2
+    echo "If you deliberately bumped GITLEAKS_VERSION, re-pin GITLEAKS_CHECKSUMS_SHA256 in the Ansible config to match -- don't just accept whatever's on GitHub right now." >&2
+    exit 1
+  fi
+
+  # Now verify the tarball against the (now-trusted) checksums file.
   CHECKSUM_LINE=$(grep "$TARBALL" "$CHECKSUMS")
   echo "$CHECKSUM_LINE" | sha256sum -c -
 
@@ -72,19 +95,7 @@ su "$TARGET_USER" -c 'git config --global init.templateDir /opt/git-hooks/templa
 
 if [ -n "$REPOS" ]; then
   for REPO in $REPOS; do
-    # Hermes finding (CRITICAL): embedding $REPO inside a double-quoted
-    # `su -c "... '$REPO' ..."` string is injectable via an embedded single
-    # quote. A first fix attempt (passing REPO as a positional arg to the
-    # inner shell via `su ... -c '...' -- "$REPO"`) turned out to be
-    # unreliable -- `su`'s handling of extra args after -c isn't consistent
-    # enough to trust $1 actually arrives. Using `printf %q` instead:
-    # produces a properly shell-escaped token that's safe to interpolate
-    # back into a command string regardless of REPO's content, and this
-    # mechanism is well-established/portable (this was live-tested and
-    # confirmed working, unlike the positional-arg approach).
     REPO_Q=$(printf '%q' "$REPO")
-    # --replace-all (not --add) so re-running doesn't accumulate duplicate
-    # safe.directory entries (Hermes MEDIUM finding).
     su "$TARGET_USER" -c "git config --global --replace-all safe.directory $REPO_Q"
     if su "$TARGET_USER" -c "git -C $REPO_Q config core.hooksPath /opt/git-hooks/hooks"; then
       echo "$REPO wired"

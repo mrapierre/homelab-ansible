@@ -15,13 +15,20 @@
 #   ansible-playbook playbooks/git_precommit_gate.yml --check --diff   (dry run)
 #
 # Both plays now share ONE canonical installer (roles/git_precommit_gate/
-# files/install-git-hooks.sh, backlog #308 -- previously the LXC and VM
-# paths were two independent implementations). LXC containers go through
+# files/install-git-hooks.sh, backlog #308). LXC containers go through
 # `pct exec` from the pve host (this repo's established pattern for LXC --
 # see harden_containers.yml; the community.proxmox.proxmox_pct_remote
 # connection plugin has proven unreliable here and is intentionally not
 # used) to push the script in and run it. VM151 is direct SSH, so the
 # git_precommit_gate role runs the same script directly.
+#
+# NOTE: if you bump git_precommit_gate_gitleaks_version, you MUST also
+# update git_precommit_gate_gitleaks_checksums_sha256 below to match the new
+# version's checksums.txt (backlog #305 follow-up F3) -- the installer
+# deliberately fails loudly rather than silently accepting a mismatch. Get
+# the value with:
+#   curl -fsSL -o checksums.txt https://github.com/gitleaks/gitleaks/releases/download/vX.Y.Z/gitleaks_X.Y.Z_checksums.txt
+#   sha256sum checksums.txt
 
 - name: Deploy git pre-commit/pre-push gate — LXC containers via pct exec
   hosts: pve
@@ -29,6 +36,7 @@
   tags: [git_precommit_gate, lxc]
   vars:
     git_precommit_gate_gitleaks_version: "8.30.1"
+    git_precommit_gate_gitleaks_checksums_sha256: "061476c21adaf5441516f96f185c1a4706a83cd6329b9b38762271b3d4a52fae"
     git_precommit_gate_files_dir: "{{ playbook_dir }}/../roles/git_precommit_gate/files"
     # vmid -> list of repo paths to wire core.hooksPath for on that container.
     # CT148's repos are owned by 'anthony', not root.
@@ -101,6 +109,7 @@
 
           pct exec "$VMID" -- env \
             GITLEAKS_VERSION={{ git_precommit_gate_gitleaks_version | quote }} \
+            GITLEAKS_CHECKSUMS_SHA256={{ git_precommit_gate_gitleaks_checksums_sha256 | quote }} \
             TARGET_USER="$USER" \
             FILES_DIR=/tmp/git-hooks-stage \
             REPOS="$REPOS" \

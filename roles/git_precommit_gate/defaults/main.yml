@@ -1,6 +1,20 @@
 ---
 git_precommit_gate_gitleaks_version: "8.30.1"
 
+# SHA256 of gitleaks' own published gitleaks_<version>_checksums.txt for the
+# version above -- pinned here deliberately, not fetched live, because
+# gitleaks doesn't GPG-sign or cosign-attest that file. This is the
+# practical substitute for signature verification (backlog #305 follow-up
+# F3): an attacker compromising the GitHub release would need to match this
+# pinned value too, not just the checksums file alone.
+#
+# MUST be updated by hand whenever git_precommit_gate_gitleaks_version is
+# bumped -- the installer deliberately fails loudly rather than silently
+# accepting a mismatched checksums file. To get the value for a new version:
+#   curl -fsSL -o checksums.txt https://github.com/gitleaks/gitleaks/releases/download/vX.Y.Z/gitleaks_X.Y.Z_checksums.txt
+#   sha256sum checksums.txt
+git_precommit_gate_gitleaks_checksums_sha256: "061476c21adaf5441516f96f185c1a4706a83cd6329b9b38762271b3d4a52fae"
+
 # List of absolute repo paths on this host to wire core.hooksPath for.
 # Override per-host in host_vars/<hostname>.yml.
 git_precommit_gate_repos: []

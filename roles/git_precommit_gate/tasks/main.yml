@@ -22,6 +22,7 @@
   ansible.builtin.command: /opt/git-hooks-stage/install-git-hooks.sh
   environment:
     GITLEAKS_VERSION: "{{ git_precommit_gate_gitleaks_version }}"
+    GITLEAKS_CHECKSUMS_SHA256: "{{ git_precommit_gate_gitleaks_checksums_sha256 }}"
     TARGET_USER: "{{ git_precommit_gate_user }}"
     FILES_DIR: /opt/git-hooks-stage
     REPOS: "{{ git_precommit_gate_repos | join(' ') }}"
