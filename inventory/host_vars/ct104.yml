@@ -1,0 +1,4 @@
+---
+git_precommit_gate_repos:
+  - /opt/ansible
+  - /opt/mcp-server

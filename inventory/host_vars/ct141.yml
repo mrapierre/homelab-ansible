@@ -1,0 +1,3 @@
+---
+git_precommit_gate_repos:
+  - /opt/ibidder

@@ -1,0 +1,5 @@
+---
+git_precommit_gate_repos:
+  - /opt/nntmux-setup
+  - /root/pierre-job-agent
+  - /root/whisper-web

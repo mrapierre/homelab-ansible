@@ -1,0 +1,9 @@
+---
+# Repos here are owned by the 'anthony' user, not root -- git config must be
+# run as that user or it silently configures the wrong account's global config.
+git_precommit_gate_user: anthony
+git_precommit_gate_repos:
+  - /home/anthony/Projects/Cadence
+  - /home/anthony/Projects/Stagioni
+  - /home/anthony/Projects/HomelabDashboard
+  - /home/anthony/Projects/wavelength

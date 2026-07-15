@@ -1,0 +1,5 @@
+---
+git_precommit_gate_repos:
+  - /opt/ai-sandbox
+  - /opt/homelab-agent
+  - /opt/synket-site

@@ -1,0 +1,152 @@
+---
+# Universal git pre-commit + pre-push secret-scanning gate (backlog #305/#306)
+# Idempotent -- safe to re-run against hosts that already have it. Needs no
+# credentials -- installing/wiring the gate is credential-free.
+#
+# CT148 is normally kept stopped between sessions (Android Studio build
+# container). This playbook does NOT start it automatically -- run
+# `pct start 148` manually first, run this playbook (--limit ct148 or the
+# default full run), then `pct stop 148` when done.
+#
+# Usage:
+#   ansible-playbook playbooks/git_precommit_gate.yml
+#   ansible-playbook playbooks/git_precommit_gate.yml --limit vm151
+#   ansible-playbook playbooks/git_precommit_gate.yml --tags lxc
+#   ansible-playbook playbooks/git_precommit_gate.yml --check --diff   (dry run)
+#
+# Two plays: LXC containers go through `pct exec` from the pve host (this
+# repo's established pattern for LXC -- see harden_containers.yml; the
+# community.proxmox.proxmox_pct_remote connection plugin has proven
+# unreliable here and is intentionally not used). VM151 is direct SSH, so it
+# uses the git_precommit_gate role with native Ansible modules instead.
+
+- name: Deploy git pre-commit/pre-push gate — LXC containers via pct exec
+  hosts: pve
+  become: false
+  tags: [git_precommit_gate, lxc]
+  vars:
+    git_precommit_gate_gitleaks_version: "8.30.1"
+    # Files live in the role's files/ dir so both plays share one source of
+    # truth -- this play just isn't invoking the role directly (it needs the
+    # pct-exec loop shape instead), so the path is spelled out explicitly.
+    git_precommit_gate_files_dir: "{{ playbook_dir }}/../roles/git_precommit_gate/files"
+    # vmid -> list of repo paths to wire core.hooksPath for on that container.
+    # CT148's repos are owned by 'anthony', not root.
+    git_precommit_gate_lxc:
+      104:
+        user: root
+        repos:
+          - /opt/ansible
+          - /opt/mcp-server
+      120:
+        user: root
+        repos:
+          - /opt/nntmux-setup
+          - /root/pierre-job-agent
+          - /root/whisper-web
+      141:
+        user: root
+        repos:
+          - /opt/ibidder
+      148:
+        user: anthony
+        repos:
+          - /home/anthony/Projects/Cadence
+          - /home/anthony/Projects/Stagioni
+          - /home/anthony/Projects/HomelabDashboard
+          - /home/anthony/Projects/wavelength
+
+  tasks:
+    - name: git-precommit-gate | create staging directory on the Proxmox host
+      ansible.builtin.file:
+        path: /tmp/git-hooks-stage
+        state: directory
+        mode: "0755"
+
+    - name: git-precommit-gate | stage role files on the Proxmox host
+      ansible.builtin.copy:
+        src: "{{ git_precommit_gate_files_dir }}/{{ item }}"
+        dest: "/tmp/git-hooks-stage/{{ item }}"
+        mode: '0644'
+      loop:
+        - gitleaks.toml
+        - pre-commit-gitleaks.sh
+        - pre-push-gitleaks.sh
+        - pre-commit
+        - pre-push
+
+    - name: git-precommit-gate | check which target containers are actually running
+      ansible.builtin.command: "pct status {{ item.key }}"
+      register: git_precommit_gate_lxc_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ git_precommit_gate_lxc | dict2items }}"
+      loop_control:
+        label: "CT{{ item.key }}"
+
+    - name: git-precommit-gate | install + wire the gate in each running target container
+      ansible.builtin.shell: |
+        set -eu
+        VMID={{ item.item.key }}
+        USER={{ item.item.value.user }}
+
+        pct exec $VMID -- mkdir -p /opt/git-hooks/bin /opt/git-hooks/lib /opt/git-hooks/hooks /opt/git-hooks/template/hooks
+
+        INSTALLED=$(pct exec $VMID -- /opt/git-hooks/bin/gitleaks version 2>/dev/null || true)
+        if [ "$INSTALLED" != "{{ git_precommit_gate_gitleaks_version }}" ]; then
+          pct exec $VMID -- bash -c "curl -sL -o /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v{{ git_precommit_gate_gitleaks_version }}/gitleaks_{{ git_precommit_gate_gitleaks_version }}_linux_x64.tar.gz && cd /tmp && tar xzf gitleaks.tar.gz gitleaks && mv gitleaks /opt/git-hooks/bin/gitleaks && chmod +x /opt/git-hooks/bin/gitleaks"
+          echo "CT$VMID: gitleaks installed ({{ git_precommit_gate_gitleaks_version }})"
+        else
+          echo "CT$VMID: gitleaks already at {{ git_precommit_gate_gitleaks_version }}"
+        fi
+
+        pct push $VMID /tmp/git-hooks-stage/gitleaks.toml /opt/git-hooks/gitleaks.toml
+        pct push $VMID /tmp/git-hooks-stage/pre-commit-gitleaks.sh /opt/git-hooks/lib/pre-commit-gitleaks.sh
+        pct push $VMID /tmp/git-hooks-stage/pre-push-gitleaks.sh /opt/git-hooks/lib/pre-push-gitleaks.sh
+        pct push $VMID /tmp/git-hooks-stage/pre-commit /opt/git-hooks/hooks/pre-commit
+        pct push $VMID /tmp/git-hooks-stage/pre-push /opt/git-hooks/hooks/pre-push
+        pct push $VMID /tmp/git-hooks-stage/pre-commit /opt/git-hooks/template/hooks/pre-commit
+        pct push $VMID /tmp/git-hooks-stage/pre-push /opt/git-hooks/template/hooks/pre-push
+
+        pct exec $VMID -- chmod +x /opt/git-hooks/lib/pre-commit-gitleaks.sh /opt/git-hooks/lib/pre-push-gitleaks.sh \
+          /opt/git-hooks/hooks/pre-commit /opt/git-hooks/hooks/pre-push \
+          /opt/git-hooks/template/hooks/pre-commit /opt/git-hooks/template/hooks/pre-push
+        pct exec $VMID -- chmod -R a+rX /opt/git-hooks
+
+        pct exec $VMID -- su $USER -c "git config --global init.templateDir /opt/git-hooks/template"
+
+        {% for repo in item.item.value.repos %}
+        pct exec $VMID -- su $USER -c "git config --global --add safe.directory {{ repo }}" || true
+        pct exec $VMID -- su $USER -c "cd {{ repo }} && git config core.hooksPath /opt/git-hooks/hooks" && echo "CT$VMID: {{ repo }} wired" || echo "CT$VMID: {{ repo }} FAILED (check the repo exists and $USER can access it)"
+        {% endfor %}
+
+        echo "CT$VMID: done"
+      loop: "{{ git_precommit_gate_lxc_status.results }}"
+      loop_control:
+        label: "CT{{ item.item.key }}"
+      when: "'status: running' in item.stdout"
+      register: git_precommit_gate_lxc_result
+      changed_when: false
+
+    - name: git-precommit-gate | show skipped (not running) containers
+      ansible.builtin.debug:
+        msg: "CT{{ item.item.key }}: SKIPPED -- {{ item.stdout | default('not running') }}"
+      loop: "{{ git_precommit_gate_lxc_status.results }}"
+      loop_control:
+        label: "CT{{ item.item.key }}"
+      when: "'status: running' not in item.stdout"
+
+    - name: git-precommit-gate | results
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ git_precommit_gate_lxc_result.results }}"
+      loop_control:
+        label: "CT{{ item.item.item.key }}"
+      when: item.skipped is not defined
+
+- name: Deploy git pre-commit/pre-push gate — VM151 (direct SSH)
+  hosts: vm151
+  become: true
+  tags: [git_precommit_gate, vm]
+  roles:
+    - git_precommit_gate

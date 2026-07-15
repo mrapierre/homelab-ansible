@@ -1,0 +1,11 @@
+---
+git_precommit_gate_gitleaks_version: "8.30.1"
+
+# List of absolute repo paths on this host to wire core.hooksPath for.
+# Override per-host in host_vars/<hostname>.yml.
+git_precommit_gate_repos: []
+
+# System user to run `git config --global` and per-repo `git config` as.
+# Defaults to root. Override per-host (e.g. CT148 uses 'anthony', since that's
+# who actually owns and commits to the Android project repos there).
+git_precommit_gate_user: root
