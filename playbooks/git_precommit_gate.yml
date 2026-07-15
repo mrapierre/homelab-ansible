@@ -108,7 +108,7 @@
       loop: "{{ git_precommit_gate_lxc_status.results }}"
       loop_control:
         label: "CT{{ item.item.key }}"
-      when: "'status: running' in item.stdout"
+      when: item.stdout is search('status:\\s+running')
       register: git_precommit_gate_lxc_result
       changed_when: "'installed and checksum-verified' in git_precommit_gate_lxc_result.stdout | default('')"
       failed_when: false
@@ -130,7 +130,7 @@
       loop: "{{ git_precommit_gate_lxc_status.results }}"
       loop_control:
         label: "CT{{ item.item.key }}"
-      when: "'status: running' not in item.stdout"
+      when: not (item.stdout is search('status:\\s+running'))
 
     - name: git-precommit-gate | results
       ansible.builtin.debug:

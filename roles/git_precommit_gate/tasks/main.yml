@@ -1,9 +1,4 @@
 ---
-# Shared installer, single source of truth for both the LXC and VM
-# deployment paths (backlog #308 -- previously duplicated). This role now
-# just stages the canonical script + support files and invokes it; all the
-# actual install/verify/wire logic lives in install-git-hooks.sh.
-
 - name: git-precommit-gate | create staging directory
   ansible.builtin.file:
     path: /opt/git-hooks-stage
@@ -32,12 +27,12 @@
     REPOS: "{{ git_precommit_gate_repos | join(' ') }}"
   register: git_precommit_gate_result
   changed_when: "'installed and checksum-verified' in git_precommit_gate_result.stdout"
-  failed_when: false
-
-- name: git-precommit-gate | fail loudly if the installer reported an error (Hermes F5)
-  ansible.builtin.fail:
-    msg: "Installer failed on this host -- {{ git_precommit_gate_result.stdout }} {{ git_precommit_gate_result.stderr }}"
-  when: git_precommit_gate_result.rc != 0
+  # Hermes finding (MEDIUM, ansible-unify-lxc-vm review): failed_when:false
+  # here plus a separate fail task was needed for the LXC play's multi-host
+  # loop (so one container's failure doesn't stop the others being
+  # attempted), but VM151 is a single host -- no loop-continuation reason to
+  # suppress the natural task failure here. Simplified: let the command task
+  # fail on its own non-zero exit.
 
 - name: git-precommit-gate | result
   ansible.builtin.debug:

@@ -13,9 +13,8 @@
 #                      pre-commit, pre-push (already staged before this runs)
 # Optional:
 #   REPOS              space-separated absolute repo paths to wire
-#                      core.hooksPath for. None of the current repo paths
-#                      contain spaces; this script assumes that stays true.
-set -eu
+#                      core.hooksPath for.
+set -eu -o pipefail
 
 : "${GITLEAKS_VERSION:?GITLEAKS_VERSION not set}"
 : "${TARGET_USER:?TARGET_USER not set}"
@@ -24,29 +23,33 @@ REPOS="${REPOS:-}"
 
 mkdir -p /opt/git-hooks/bin /opt/git-hooks/lib /opt/git-hooks/hooks /opt/git-hooks/template/hooks
 
-# Exact, trimmed version comparison -- NOT a substring match (Hermes F4 from
-# the original review: "8.30.1" is a substring of "8.30.10", which would
-# falsely pass as already-installed under a naive `in` check).
+# Exact, trimmed version comparison -- not a substring match.
 INSTALLED=$(/opt/git-hooks/bin/gitleaks version 2>/dev/null | tr -d '[:space:]' || true)
 if [ "$INSTALLED" != "$GITLEAKS_VERSION" ]; then
   cd /tmp
   TARBALL="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
   CHECKSUMS="gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+  cleanup() { rm -f "$TARBALL" "$CHECKSUMS"; }
+  trap cleanup EXIT
 
   curl -fsSL -o "$TARBALL" \
     "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${TARBALL}"
   curl -fsSL -o "$CHECKSUMS" \
     "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${CHECKSUMS}"
 
-  # Integrity verification (Hermes F3 from the original review) -- a
-  # compromised release asset or MITM'd download would otherwise install a
-  # binary that then runs on every commit/push across every wired repo.
-  grep "$TARBALL" "$CHECKSUMS" | sha256sum -c -
+  # Hermes finding (CRITICAL): the previous `grep ... | sha256sum -c -`
+  # pipeline could silently "pass" if grep found no matching line -- under
+  # plain `set -e` (no pipefail), a pipeline's exit status is only the LAST
+  # command's. `set -o pipefail` above plus separating the grep out makes
+  # the failure mode explicit either way.
+  CHECKSUM_LINE=$(grep "$TARBALL" "$CHECKSUMS")
+  echo "$CHECKSUM_LINE" | sha256sum -c -
 
   tar xzf "$TARBALL" gitleaks
   mv gitleaks /opt/git-hooks/bin/gitleaks
   chmod +x /opt/git-hooks/bin/gitleaks
-  rm -f "$TARBALL" "$CHECKSUMS"
+  trap - EXIT
+  cleanup
   echo "gitleaks installed and checksum-verified ($GITLEAKS_VERSION)"
 else
   echo "gitleaks already at $GITLEAKS_VERSION"
@@ -65,15 +68,25 @@ chmod +x /opt/git-hooks/lib/pre-commit-gitleaks.sh /opt/git-hooks/lib/pre-push-g
   /opt/git-hooks/template/hooks/pre-commit /opt/git-hooks/template/hooks/pre-push
 chmod -R a+rX /opt/git-hooks
 
-su "$TARGET_USER" -c "git config --global init.templateDir /opt/git-hooks/template"
+su "$TARGET_USER" -c 'git config --global init.templateDir /opt/git-hooks/template'
 
-# Repo wiring fails loudly (Hermes F5 from the original review) -- a repo
-# that can't be wired exits this script non-zero rather than silently
-# reporting success.
 if [ -n "$REPOS" ]; then
   for REPO in $REPOS; do
-    su "$TARGET_USER" -c "git config --global --add safe.directory '$REPO'"
-    if su "$TARGET_USER" -c "cd '$REPO' && git config core.hooksPath /opt/git-hooks/hooks"; then
+    # Hermes finding (CRITICAL): embedding $REPO inside a double-quoted
+    # `su -c "... '$REPO' ..."` string is injectable via an embedded single
+    # quote. A first fix attempt (passing REPO as a positional arg to the
+    # inner shell via `su ... -c '...' -- "$REPO"`) turned out to be
+    # unreliable -- `su`'s handling of extra args after -c isn't consistent
+    # enough to trust $1 actually arrives. Using `printf %q` instead:
+    # produces a properly shell-escaped token that's safe to interpolate
+    # back into a command string regardless of REPO's content, and this
+    # mechanism is well-established/portable (this was live-tested and
+    # confirmed working, unlike the positional-arg approach).
+    REPO_Q=$(printf '%q' "$REPO")
+    # --replace-all (not --add) so re-running doesn't accumulate duplicate
+    # safe.directory entries (Hermes MEDIUM finding).
+    su "$TARGET_USER" -c "git config --global --replace-all safe.directory $REPO_Q"
+    if su "$TARGET_USER" -c "git -C $REPO_Q config core.hooksPath /opt/git-hooks/hooks"; then
       echo "$REPO wired"
     else
       echo "$REPO FAILED -- repo missing or $TARGET_USER lacks access" >&2
