@@ -1,0 +1,16 @@
+title = "homelab universal pre-commit gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "paths excluded from scanning (deps, build output, vendored code only -- review snapshots are NOT excluded, they get scanned like everything else)"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)venv/''',
+  '''(^|/)vendor/''',
+  '''(^|/)build/''',
+  '''(^|/)dist/''',
+  '''(^|/)\.gradle/''',
+]
