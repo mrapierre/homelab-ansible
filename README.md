@@ -25,6 +25,18 @@ Infrastructure as Code for the Sevenbirches homelab.
   on it. Idempotent, credential-free. Targets the `git_hooks_hosts` inventory
   group. CT148 is normally stopped between sessions -- `pct start 148` first if
   it needs (re-)provisioning there.
+- `hermes_reviewer_hardening.yml` — deploys the backlog #346/#347/#348/#349
+  reviewer least-privilege + prompt-indirection + symlink-hardened fire
+  script package (role: `hermes_reviewer_hardening`) to hosts running an
+  editable hermes-agent install used as an isolated code-review target.
+  Idempotent (verified via a throwaway ad-hoc inventory against CT152,
+  2026-07-23: second run reports changed=0). Currently targets
+  `vps_ihostart` only -- CT152 isn't in this repo's inventory yet
+  (backlog #342, its own dedicated session by design, not bundled here).
+  The VPS-side vars in the playbook are carried over from the original
+  pre-hardening design sheet, NOT re-verified live -- the VPS was down
+  for the entire session this role was built in. Re-verify ground truth
+  on ihostart before the first real run there.
 
 ## Usage
 ```bash

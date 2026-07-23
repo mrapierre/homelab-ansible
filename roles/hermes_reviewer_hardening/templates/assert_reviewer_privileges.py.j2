@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""
+assert_reviewer_privileges.py -- regression guard for backlog #347.
+DEPLOYED BY ANSIBLE (hermes_reviewer_hardening role) -- do not hand-edit;
+change the role's defaults/main.yml or host_vars instead and re-run.
+
+Runs `hermes -p <profile> tools list` for each locally-reviewed profile,
+parses the enabled toolsets, and exits non-zero if anything outside the
+allowlist is enabled, if a required toolset from the allowlist is
+MISSING (Kimi finding 9, backlog-346-final-kimi-review -- a regression
+that silently disabled 'todo' specifically would hang the reviewer, per
+the empty-oneshot ground-truth finding, and previously reported PASS),
+or if an MCP servers section reports anything attached. Exits 0 only
+when the reviewer profile matches the WS1 target posture exactly.
+
+Usage: assert_reviewer_privileges.py [profile ...]
+       (defaults to this host's configured profiles if none given)
+"""
+import os
+import re
+import subprocess
+import sys
+
+HERMES = "/usr/local/bin/hermes"
+DEFAULT_PROFILES = [{% for p in hermes_reviewer_hardening_profiles %}"{{ p.name }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+
+ALLOWED_TOOLSETS = {{"{"}}{% for t in hermes_reviewer_hardening_allowed_toolsets %}"{{ t }}"{% if not loop.last %}, {% endif %}{% endfor %}{{"}"}}
+
+ENABLED_RE = re.compile(r"^\s*\u2713\s+enabled\s+(\S+)")
+# Anchored to the actual `tools list` MCP section header format
+# ("MCP servers:" at the start of a line), not a bare substring match,
+# to avoid false-positiving on a tool name/description that merely
+# contains "mcp" somewhere in its text.
+MCP_SECTION_RE = re.compile(r"^\s*MCP servers\s*:", re.IGNORECASE)
+
+STDERR_LOG = "{{ hermes_reviewer_hardening_assert_script_path }}.stderr.log"
+
+
+def _log_stderr(profile: str, stderr: str) -> None:
+    # Forced 0600 regardless of umask (Kimi finding 6) -- paths, env
+    # details, or tokens in hermes stderr could otherwise be readable by
+    # anything with access to the parent directory.
+    try:
+        fd = os.open(STDERR_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"--- {profile} ---\n{stderr}\n")
+    except OSError:
+        pass  # best-effort; never let logging failure mask the real result
+
+
+def check_profile(profile: str) -> list[str]:
+    """Return a list of problem strings; empty means the profile passed."""
+    try:
+        out = subprocess.run(
+            [HERMES, "-p", profile, "tools", "list"],
+            capture_output=True, text=True, timeout=30, check=False,
+            encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"could not run 'hermes -p {profile} tools list': {e}"]
+
+    if out.returncode != 0:
+        _log_stderr(profile, out.stderr)
+        return [f"'hermes -p {profile} tools list' exited {out.returncode} "
+                f"(stderr logged to {STDERR_LOG}, not printed here)"]
+
+    problems = []
+    enabled = set()
+    for line in out.stdout.splitlines():
+        m = ENABLED_RE.match(line)
+        if m:
+            enabled.add(m.group(1))
+
+    extra = enabled - ALLOWED_TOOLSETS
+    if extra:
+        problems.append(
+            f"{profile}: toolsets enabled outside the allowlist: {sorted(extra)}"
+        )
+    if not enabled:
+        problems.append(
+            f"{profile}: no toolsets reported enabled at all -- 'tools list' "
+            "output format may have changed; treat as a failure, not a pass"
+        )
+    missing = ALLOWED_TOOLSETS - enabled
+    if missing:
+        problems.append(
+            f"{profile}: expected toolsets missing (not just extra ones "
+            f"absent): {sorted(missing)}"
+        )
+
+    for line in out.stdout.splitlines():
+        if MCP_SECTION_RE.match(line):
+            problems.append(f"{profile}: MCP servers section present: {line.strip()!r}")
+
+    return problems
+
+
+def main() -> int:
+    profiles = sys.argv[1:] or DEFAULT_PROFILES
+    ok = True
+    for profile in profiles:
+        problems = check_profile(profile)
+        if problems:
+            ok = False
+            for p in problems:
+                print(f"FAIL: {p}", file=sys.stderr)
+        else:
+            print(f"PASS: {profile} -- only {sorted(ALLOWED_TOOLSETS)} enabled, no MCP")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

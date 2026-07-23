@@ -1,0 +1,40 @@
+---
+# Hermes Reviewer Hardening -- backlog #346/#347/#348/#349
+#
+# Applies the hermes_reviewer_hardening role. Deliberately does NOT
+# include CT152 in its host list yet -- CT152 isn't in this repo's
+# inventory (backlog #342, which Anthony wants handled as its own
+# dedicated session, not bundled into this). Add a play/host entry here
+# once #342 lands.
+#
+# ihostart (the VPS) IS already in inventory (group vps_ihostart) and IS
+# included below, but its host_vars profile/path values in this role's
+# defaults are CARRIED OVER FROM THE ORIGINAL PRE-HARDENING DESIGN SHEET,
+# not re-verified live the way every CT152 value was -- the VPS was down
+# for the entire 2026-07-22/23 session this role was built in. Re-verify
+# ground truth on ihostart (hermes version, actual profile names/wrapper
+# paths, whether _parser.py's structure still matches what
+# patch_hermes_parser.py expects) BEFORE running this for real there --
+# the patcher scripts themselves refuse to write blind if their anchors
+# don't match (see files/patch_hermes_parser.py's UNSAFE exit path), but
+# "refuses safely" is not the same as "verified correct", and a profile
+# name mismatch would just silently do nothing useful rather than error.
+
+- name: Hermes Reviewer Hardening
+  hosts: vps_ihostart
+  become: true
+  tags: hermes_reviewer_hardening
+  vars:
+    hermes_reviewer_hardening_profiles:
+      - name: reviewer-agent
+        config_path: /root/.hermes/profiles/reviewer-agent/config.yaml
+        wrapper_path: /root/.local/bin/reviewer-agent
+        has_existing_agent_block: false
+      - name: kimi-reviewer-agent
+        config_path: /root/.hermes/profiles/kimi-reviewer-agent/config.yaml
+        wrapper_path: /root/.local/bin/kimi-reviewer-agent
+        has_existing_agent_block: false
+    hermes_reviewer_hardening_fire_script_path: /root/.hermes/handover/fire_reviewer_agent.py
+    hermes_reviewer_hardening_install_sweeper: true
+  roles:
+    - hermes_reviewer_hardening

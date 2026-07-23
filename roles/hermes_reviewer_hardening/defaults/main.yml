@@ -1,0 +1,73 @@
+---
+# hermes_reviewer_hardening — backlog #346/#347/#348/#349
+#
+# Idempotently deploys the full reviewer-least-privilege + prompt-
+# indirection + symlink-hardened fire-script package to a host running an
+# editable hermes-agent install used as an isolated code-review target.
+#
+# Defaults below are CT152's VERIFIED values (the reference implementation,
+# built and gate-approved 2026-07-22/23). Override per-host in
+# inventory/host_vars/<host>.yml wherever the layout differs -- e.g. the
+# ihostart VPS may use different wrapper binary paths for its
+# reviewer-agent/kimi-reviewer-agent profiles than CT152's
+# ct152-reviewer-agent/ct152-kimi-reviewer ones. CONFIRM THESE ON THE VPS
+# BEFORE FIRST RUN THERE -- it was unreachable all of 2026-07-22/23 so
+# these VPS-side values are carried over from the ORIGINAL (pre-hardening)
+# design sheet's ground truth, not re-verified live the way every CT152
+# value in this role was.
+
+hermes_reviewer_hardening_parser_path: /usr/local/lib/hermes-agent/hermes_cli/_parser.py
+
+# One entry per reviewer profile on this host: config_path is the
+# profile's config.yaml, wrapper_path is the binary fire_local_reviewer.py
+# (or fire_reviewer_agent.py) launches, has_existing_agent_block says
+# whether config.yaml already has a top-level `agent:` key (changes how
+# the config patcher inserts disabled_toolsets -- see files/patch_config_agent_block.py).
+hermes_reviewer_hardening_profiles:
+  - name: ct152-reviewer-agent
+    config_path: /root/.hermes/profiles/ct152-reviewer-agent/config.yaml
+    wrapper_path: /root/.local/bin/ct152-reviewer-agent
+    has_existing_agent_block: false
+  - name: ct152-kimi-reviewer
+    config_path: /root/.hermes/profiles/ct152-kimi-reviewer/config.yaml
+    wrapper_path: /root/.local/bin/ct152-kimi-reviewer
+    has_existing_agent_block: true
+
+hermes_reviewer_hardening_fire_script_path: /root/.hermes/handover/fire_local_reviewer.py
+hermes_reviewer_hardening_assert_script_path: /root/.hermes/handover/assert_reviewer_privileges.py
+
+# WS1.3's target posture: everything disabled except this list. todo is the
+# hard floor (its absence hangs the reviewer -- see the -z "" ground-truth
+# finding); vision/skills/clarify are carried forward per the original
+# design sheet's target posture, not independently re-justified here.
+hermes_reviewer_hardening_allowed_toolsets:
+  - todo
+  - vision
+  - skills
+  - clarify
+
+hermes_reviewer_hardening_disabled_toolsets:
+  - terminal
+  - code_execution
+  - file
+  - browser
+  - computer_use
+  - delegation
+  - cronjob
+  - web
+  - image_gen
+  - tts
+  - memory
+  - session_search
+
+# Backup suffix used for every file this role touches, so a rollback is
+# always a straight `cp <path>.<suffix> <path>` -- matches the manual
+# convention used throughout the 2026-07-22/23 session (.bak-pre-346-*
+# etc.), unified into one tag for anything Ansible-applied from here on.
+hermes_reviewer_hardening_backup_suffix: ".bak-ansible-hermes-reviewer-hardening"
+
+# Hourly stale-file sweep for /tmp/rr_prompt_*/rr_out_* (WS3.3). Disabled by
+# default so a host isn't silently opted in without review -- set true in
+# host_vars once a host is confirmed to actually receive these files
+# (i.e. it's wired up in REVIEWER_TARGETS in run_review.py on VM151).
+hermes_reviewer_hardening_install_sweeper: false

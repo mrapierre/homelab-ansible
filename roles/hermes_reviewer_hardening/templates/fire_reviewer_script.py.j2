@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+fire_local_reviewer.py -- CT152-local equivalent of the VPS's
+fire_reviewer_agent.py (or vice versa, whichever host this is deployed
+to). DEPLOYED BY ANSIBLE (hermes_reviewer_hardening role) -- do not
+hand-edit; change the role's defaults/main.yml or host_vars instead and
+re-run.
+
+- The prompt travels ONLY as a file path, never as content -- in argv,
+  in memory in this script, or anywhere else (backlog #346 WS2). This
+  script only validates the path and passes "@" + prompt_file as the -z
+  value; the patched hermes install (_parser.py, HERMES-LOCALPATCH
+  marker) resolves it by reading the file itself.
+- stdin is explicitly DEVNULL and the process is detached
+  (start_new_session=True) so it behaves like nohup.
+- Prints RA_STARTED:<pid> on success so the caller (run_review.py) can
+  poll it.
+- Fail-closed preflight (WS2.3): refuses to spawn if the patch marker OR
+  its actual wiring onto -z is missing from _parser.py (Kimi finding 5,
+  backlog-346-final-kimi-review -- marker-only checking would pass a
+  partially reverted patch), or if the WS1.4 privilege assertion fails
+  for this profile.
+- Output/.err files opened with O_NOFOLLOW (Kimi finding 1, HIGH -- a
+  planted symlink could otherwise redirect a truncating write at an
+  arbitrary target) and created under a temporary os.umask(0o077) so
+  they're 0600 from birth, not just fchmod'd afterward (Kimi finding 2).
+
+Profile name is validated against a fixed allowlist rather than accepted
+as an arbitrary string -- defense in depth, since this script executes a
+binary path built from that argument.
+
+MAX_PROMPT_BYTES (the old argv-safety ceiling) does not exist here: the
+patched hermes install enforces its own 8 MiB file-size cap
+(_ONESHOT_FILE_MAX_BYTES in _parser.py) on the actual file read, which is
+both the correct place for the check and a strictly larger, more accurate
+limit than a duplicate check in this script would be.
+"""
+import os
+import re
+import subprocess
+import sys
+
+ALLOWED_PROFILES = {
+{% for p in hermes_reviewer_hardening_profiles %}    "{{ p.name }}": "{{ p.wrapper_path }}",
+{% endfor %}}
+
+# Known, accepted maintenance hazard: both absolute paths below are
+# assumptions about this specific host's layout. A relocated hermes-agent
+# install or a moved handover directory would need these updated (via the
+# role's vars, then a re-run) by hand. That is a deliberate trade-off:
+# failing closed (refusing to spawn) when either path is wrong/missing is
+# exactly the desired behaviour for an upgrade that silently changed the
+# layout.
+PARSER_PATH = "{{ hermes_reviewer_hardening_parser_path }}"
+PATCH_MARKER = "HERMES-LOCALPATCH: oneshot-file-indirection v1"
+ASSERT_SCRIPT = "{{ hermes_reviewer_hardening_assert_script_path }}"
+# Kimi cold review finding 5: proves the patch is actually WIRED onto the
+# -z argument, not just present somewhere in the file as dead code.
+PATCH_WIRING_RE = re.compile(r"type\s*=\s*_oneshot_prompt\s*,")
+
+
+def _patch_preflight() -> str | None:
+    """Return an error string if the local hermes patch isn't present AND
+    actually wired onto the -z argument, else None. Fails closed."""
+    try:
+        with open(PARSER_PATH, "r", encoding="utf-8", errors="strict") as f:
+            content = f.read()
+    except OSError as e:
+        return (f"cannot read {PARSER_PATH!r} ({e}) -- cannot confirm the "
+                f"backlog #346 local patch is present. Refusing to spawn "
+                f"rather than assume argv-based delivery is still safe.")
+    if PATCH_MARKER not in content:
+        return (f"{PARSER_PATH!r} does not contain the expected marker "
+                f"({PATCH_MARKER!r}) -- the backlog #346 local patch has "
+                f"been reverted, almost certainly by a hermes update. "
+                f"Refusing to spawn rather than silently fall back to "
+                f"argv-based prompt delivery (the original #346 leak).")
+    if not PATCH_WIRING_RE.search(content):
+        return (f"{PARSER_PATH!r} contains the {PATCH_MARKER!r} marker but "
+                f"the -z argument no longer appears to have "
+                f"type=_oneshot_prompt wired onto it -- the patch has been "
+                f"partially reverted (marker kept, wiring removed). "
+                f"Refusing to spawn rather than silently fall back to "
+                f"argv-based prompt delivery.")
+    return None
+
+
+def _privilege_preflight(profile_name: str) -> str | None:
+    """Return an error string if the WS1 regression guard fails for this
+    profile, else None. Fails closed."""
+    try:
+        out = subprocess.run(
+            [sys.executable, ASSERT_SCRIPT, profile_name],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"could not run {ASSERT_SCRIPT!r} for {profile_name!r}: {e}"
+    if out.returncode != 0:
+        return (f"privilege assertion failed for {profile_name!r} "
+                f"(backlog #347 regression guard):\n{out.stderr.strip()}")
+    return None
+
+
+def main():
+    if len(sys.argv) != 4:
+        print(
+            "usage: fire_local_reviewer.py <profile-name> <prompt_file> <output_file>",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    profile_name, prompt_file, output_file = sys.argv[1], sys.argv[2], sys.argv[3]
+
+    wrapper_path = ALLOWED_PROFILES.get(profile_name)
+    if wrapper_path is None:
+        print(
+            f"refusing: '{profile_name}' is not an allowlisted profile "
+            f"(known: {sorted(ALLOWED_PROFILES)})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if not os.path.isfile(prompt_file):
+        print(f"refusing: prompt_file {prompt_file!r} is not a regular file", file=sys.stderr)
+        sys.exit(2)
+
+    if not os.path.isabs(prompt_file):
+        print(
+            f"refusing: prompt_file {prompt_file!r} must be an absolute path "
+            f"(a relative path would be sent as a literal '@{prompt_file}' "
+            f"prompt instead of triggering file indirection)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    patch_problem = _patch_preflight()
+    if patch_problem:
+        print(f"refusing: {patch_problem}", file=sys.stderr)
+        sys.exit(1)
+
+    priv_problem = _privilege_preflight(profile_name)
+    if priv_problem:
+        print(f"refusing: {priv_problem}", file=sys.stderr)
+        sys.exit(1)
+
+    old_umask = os.umask(0o077)
+    try:
+        try:
+            out_fd = os.open(output_file,
+                             os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            os.fchmod(out_fd, 0o600)
+            out_fh = os.fdopen(out_fd, "w", encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"cannot open output file {output_file!r}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            err_fd = os.open(output_file + ".err",
+                             os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            os.fchmod(err_fd, 0o600)
+            err_fh = os.fdopen(err_fd, "w", encoding="utf-8", errors="replace")
+        except OSError as e:
+            out_fh.close()
+            print(f"cannot open error file {output_file}.err: {e}", file=sys.stderr)
+            sys.exit(1)
+    finally:
+        os.umask(old_umask)
+
+    try:
+        proc = subprocess.Popen(
+            [wrapper_path, "-t", "todo", "-z", "@" + prompt_file, "--cli"],
+            stdin=subprocess.DEVNULL,
+            stdout=out_fh,
+            stderr=err_fh,
+            start_new_session=True,
+        )
+    except OSError as e:
+        out_fh.close()
+        err_fh.close()
+        print(f"failed to launch {wrapper_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"RA_STARTED:{proc.pid}", flush=True)
+    out_fh.close()
+    err_fh.close()
+
+
+if __name__ == "__main__":
+    main()

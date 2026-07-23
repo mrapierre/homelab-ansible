@@ -3,3 +3,4 @@ host_vars/*/vault.yml
 group_vars/*/vault.yml
 .vault_pass
 *.log
+__pycache__/

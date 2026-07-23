@@ -1,0 +1,151 @@
+---
+# hermes_reviewer_hardening -- backlog #346/#347/#348/#349 (WS1+WS2, plus
+# the Kimi second-opinion hardening pass folded in from the start).
+#
+# Idempotent by construction: every patcher script checks for its own
+# marker/key before writing and reports UNCHANGED if already applied, so
+# re-running this role against an already-hardened host (e.g. CT152,
+# where it was applied by hand first) should report changed=false on
+# every task. That's the intended acceptance test for this role itself,
+# not just for what it deploys -- see the role's README for how it was
+# verified against CT152 via an ad-hoc inventory entry before being
+# considered ready for a real host.
+#
+# WS3 (snapshot 0600-from-birth, try/finally cleanup, shlex.quote
+# hardening) is NOT part of this role -- it lives entirely in
+# run_review.py on VM151, a single shared file with no per-host
+# variation, so there's nothing here to templatize for it. Deploying
+# run_review.py itself is out of scope for this role (it's not
+# host-specific infrastructure the way the reviewer profiles are).
+
+- name: hermes-reviewer-hardening | backup config.yaml for each profile
+  ansible.builtin.copy:
+    src: "{{ item.config_path }}"
+    dest: "{{ item.config_path }}{{ hermes_reviewer_hardening_backup_suffix }}"
+    remote_src: true
+    force: false  # never overwrite an existing backup -- first run wins
+  loop: "{{ hermes_reviewer_hardening_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: hermes-reviewer-hardening | stage the config patcher script
+  ansible.builtin.copy:
+    src: patch_config_agent_block.py
+    dest: /tmp/hermes_reviewer_hardening_patch_config_agent_block.py
+    mode: '0755'
+
+- name: hermes-reviewer-hardening | patch config.yaml disabled_toolsets (WS1.3)
+  ansible.builtin.command:
+    argv:
+      - python3
+      - /tmp/hermes_reviewer_hardening_patch_config_agent_block.py
+      - "{{ item.config_path }}"
+      - "{{ item.has_existing_agent_block | string | lower }}"
+      - "{{ hermes_reviewer_hardening_disabled_toolsets | join(',') }}"
+  loop: "{{ hermes_reviewer_hardening_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: hermes_reviewer_hardening_config_patch_result
+  changed_when: "hermes_reviewer_hardening_config_patch_result.stdout | trim == 'CHANGED'"
+  failed_when: >
+    hermes_reviewer_hardening_config_patch_result.rc != 0 or
+    'UNSAFE' in hermes_reviewer_hardening_config_patch_result.stdout
+
+- name: hermes-reviewer-hardening | backup fire script
+  ansible.builtin.copy:
+    src: "{{ hermes_reviewer_hardening_fire_script_path }}"
+    dest: "{{ hermes_reviewer_hardening_fire_script_path }}{{ hermes_reviewer_hardening_backup_suffix }}"
+    remote_src: true
+    force: false
+  ignore_errors: true  # fine if the fire script doesn't exist yet on a brand-new host
+
+- name: hermes-reviewer-hardening | deploy fire script (WS1.2 + WS2.2, Kimi-hardened)
+  ansible.builtin.template:
+    src: fire_reviewer_script.py.j2
+    dest: "{{ hermes_reviewer_hardening_fire_script_path }}"
+    mode: '0755'
+
+- name: hermes-reviewer-hardening | deploy assert_reviewer_privileges.py (WS1.4, Kimi-hardened)
+  ansible.builtin.template:
+    src: assert_reviewer_privileges.py.j2
+    dest: "{{ hermes_reviewer_hardening_assert_script_path }}"
+    mode: '0755'
+
+- name: hermes-reviewer-hardening | backup _parser.py
+  ansible.builtin.copy:
+    src: "{{ hermes_reviewer_hardening_parser_path }}"
+    dest: "{{ hermes_reviewer_hardening_parser_path }}{{ hermes_reviewer_hardening_backup_suffix }}"
+    remote_src: true
+    force: false
+
+- name: hermes-reviewer-hardening | stage the parser patcher script
+  ansible.builtin.copy:
+    src: patch_hermes_parser.py
+    dest: /tmp/hermes_reviewer_hardening_patch_hermes_parser.py
+    mode: '0755'
+
+- name: hermes-reviewer-hardening | patch _parser.py (WS2.1, Kimi-hardened)
+  ansible.builtin.command:
+    argv:
+      - python3
+      - /tmp/hermes_reviewer_hardening_patch_hermes_parser.py
+      - "{{ hermes_reviewer_hardening_parser_path }}"
+  register: hermes_reviewer_hardening_parser_patch_result
+  changed_when: "hermes_reviewer_hardening_parser_patch_result.stdout | trim == 'CHANGED'"
+  failed_when: >
+    hermes_reviewer_hardening_parser_patch_result.rc != 0 or
+    'UNSAFE' in hermes_reviewer_hardening_parser_patch_result.stdout
+
+- name: hermes-reviewer-hardening | verify patched _parser.py still compiles
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -m
+      - py_compile
+      - "{{ hermes_reviewer_hardening_parser_path }}"
+  changed_when: false
+
+- name: hermes-reviewer-hardening | verify deployed fire script still compiles
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -m
+      - py_compile
+      - "{{ hermes_reviewer_hardening_fire_script_path }}"
+  changed_when: false
+
+- name: hermes-reviewer-hardening | verify deployed assert script still compiles
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -m
+      - py_compile
+      - "{{ hermes_reviewer_hardening_assert_script_path }}"
+  changed_when: false
+
+- name: hermes-reviewer-hardening | run the privilege assertion for real (post-deploy sanity check)
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ hermes_reviewer_hardening_assert_script_path }}"
+  changed_when: false
+  # Non-fatal here on purpose: on a FRESH host that hasn't had hermes'
+  # profiles created yet, or where the wrapper binaries in
+  # hermes_reviewer_hardening_profiles[].wrapper_path don't exist yet,
+  # this legitimately fails and that's a real signal worth surfacing
+  # (registered + shown below), not a reason to abort the whole play.
+  register: hermes_reviewer_hardening_assert_result
+  failed_when: false
+
+- name: hermes-reviewer-hardening | report privilege assertion result
+  ansible.builtin.debug:
+    msg: "{{ hermes_reviewer_hardening_assert_result.stdout_lines + hermes_reviewer_hardening_assert_result.stderr_lines }}"
+
+- name: hermes-reviewer-hardening | install stale-file sweeper cron (WS3.3)
+  ansible.builtin.cron:
+    name: "backlog #349 stale review-artifact sweeper"
+    minute: "0"
+    job: >-
+      find /tmp -maxdepth 1 \( -name 'rr_prompt_*' -o -name 'rr_out_*' \) -mmin +1440 -delete
+    user: root
+  when: hermes_reviewer_hardening_install_sweeper | bool
