@@ -59,7 +59,7 @@ ASSERT_SCRIPT = {{ hermes_reviewer_hardening_assert_script_path | to_json }}
 # -z argument, not just present somewhere in the file as dead code.
 PATCH_WIRING_RE = re.compile(
     r'parser\.add_argument\(\s*\n\s*"-z"\s*,\s*\n\s*"--oneshot"\s*,'
-    r'(?:[^)]*?)type\s*=\s*_oneshot_prompt\s*,',
+    r'.*?type\s*=\s*_oneshot_prompt\s*,',
     re.DOTALL,
 )
 PATCH_FUNCTION_RE = re.compile(r"^def _oneshot_prompt\(value: str\) -> str:", re.MULTILINE)

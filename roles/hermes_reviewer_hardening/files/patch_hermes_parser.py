@@ -45,10 +45,20 @@ PATCH_MARKER = "HERMES-LOCALPATCH: oneshot-file-indirection v1"
 # falsely conclude the patch was wired in).
 WIRING_RE = re.compile(
     r'parser\.add_argument\(\s*\n\s*"-z"\s*,\s*\n\s*"--oneshot"\s*,'
-    r'(?:[^)]*?)type\s*=\s*_oneshot_prompt\s*,',
+    r'.*?type\s*=\s*_oneshot_prompt\s*,',
     re.DOTALL,
 )
 FUNCTION_DEF_RE = re.compile(r"^def _oneshot_prompt\(value: str\) -> str:", re.MULTILINE)
+
+# DeepSeek cold review finding 2 (backlog-346-final-deepseek-crosscheck):
+# the substring checks in _fully_wired() below used to check for
+# "\nimport os\n" / "\nimport stat\n" literally, which assumed a
+# specific byte-level layout -- would break on CRLF line endings, on
+# the import being the very first line in the file, or on a combined
+# "import os, stat". Anchored regexes match "import os"/"import stat"
+# at the start of any line regardless of surrounding whitespace.
+IMPORT_OS_RE = re.compile(r"^import os\b", re.MULTILINE)
+IMPORT_STAT_RE = re.compile(r"^import stat\b", re.MULTILINE)
 
 PATCH_SNIPPET = '''# HERMES-LOCALPATCH: oneshot-file-indirection v1
 # Local divergence from upstream hermes-agent. Submitted upstream as a PR
@@ -112,7 +122,16 @@ def _oneshot_prompt(value: str) -> str:
         raise argparse.ArgumentTypeError(
             f"--oneshot: cannot read prompt file {path!r}: {exc}"
         )
-    fh = os.fdopen(fd, "rb")
+    # DeepSeek cold review finding 3 (backlog-346-final-deepseek-crosscheck):
+    # if os.fdopen() itself were to raise after os.open() already
+    # succeeded, fd would leak (never closed). Not practically
+    # attacker-triggerable -- os.fdopen() after a successful os.open()
+    # is essentially infallible in CPython -- but cheap to close properly.
+    try:
+        fh = os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
     try:
         st = os.fstat(fh.fileno())
         if not stat.S_ISREG(st.st_mode):
@@ -203,8 +222,8 @@ def _fully_wired(content: str) -> bool:
         PATCH_MARKER in content
         and WIRING_RE.search(content)
         and FUNCTION_DEF_RE.search(content)
-        and "\nimport os\n" in content
-        and "\nimport stat\n" in content
+        and IMPORT_OS_RE.search(content)
+        and IMPORT_STAT_RE.search(content)
     )
 
 

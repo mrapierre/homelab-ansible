@@ -171,6 +171,48 @@ Full findings, fixes, and live verification evidence:
 `reviews/backlog-346-everything-final-sweep/` in the ai-sandbox repo on
 VM151.
 
+## Hardened a third time 2026-07-23 (DeepSeek cross-check)
+
+Immediately after the Kimi sweep above, Anthony asked for the same
+comprehensive bundle run through DeepSeek (`ct152-reviewer-agent`) too,
+as a final cross-check from the other model -- "this is all overkill
+but I want this system to be as complete and with no issues as
+possible." DeepSeek confirmed all 12 of Kimi's findings were correctly
+fixed with no regressions, then found 4 more from its own independent
+angle (1 medium, 3 low), 3 fixed, 1 rejected (not reproducible):
+
+- **MEDIUM, fixed**: the patch-wiring regex used `[^)]*?` (anything
+  except a closing paren) between `"--oneshot"` and `type=`. Fine
+  today, but a future `add_argument` parameter containing a literal
+  `)` (e.g. `default=some_func()`) would silently break the regex,
+  causing the preflight to report "partially reverted" and refuse to
+  spawn the reviewer -- a confusing production outage from a completely
+  unrelated routine edit. Fixed by switching to `.*?` (still
+  non-greedy, no longer paren-sensitive) in all 4 occurrences of this
+  regex (the fire script and its template, the patcher and its role
+  copy). Verified against the real file, the exact failure scenario
+  described, and that genuinely stripped wiring is still caught.
+- **LOW, fixed**: `_fully_wired()`'s import checks were literal
+  `"\nimport os\n"` substring searches -- fragile to CRLF line
+  endings, the import being the first line, or a combined
+  `import os, stat`. Replaced with anchored `re.MULTILINE` regexes.
+- **LOW, fixed**: a theoretical (practically near-impossible in
+  CPython) file descriptor leak in `_oneshot_prompt()` if
+  `os.fdopen()` itself raised after a successful `os.open()`. Fixed
+  with a proper `try`/`except os.close(fd)`. Applied to the patcher's
+  embedded source-of-truth AND directly to CT152's live `_parser.py`,
+  since the idempotency check has no way to detect "content could be
+  improved" -- only presence/absence of the patch.
+- **LOW, rejected**: DeepSeek claimed a stale docstring comment in
+  `fire_local_reviewer.py` about the stale-file sweeper. Checked
+  directly against the live file -- no such comment exists anywhere in
+  it. Recorded as rejected rather than silently dropped or blindly
+  "fixed."
+
+Full findings, fixes, and live verification:
+`reviews/backlog-346-final-deepseek-crosscheck/` in the ai-sandbox repo
+on VM151.
+
 ## Known gaps
 
 - **CT152 isn't in this repo's inventory yet** (backlog #342 — its own
