@@ -10,9 +10,25 @@ non-zero, no write) rather than guess if has_existing_agent_block=true but
 no "agent:" line is actually found -- that mismatch means the config
 drifted from what the caller expected, and blind insertion risks
 duplicating or misplacing the key.
+
+Hardened 2026-07-23 per the comprehensive final Kimi sweep
+(backlog-346-everything-final-sweep, medium finding): writes were
+previously a bare open(path, "w") -- an interrupted process or storage
+failure mid-write could leave config.yaml truncated. Now writes to a
+temp file in the same directory and os.replace()s it into place, atomic
+on the same filesystem, matching the same fix applied to
+patch_hermes_parser.py.
 """
+import os
 import re
 import sys
+
+
+def _atomic_write(path: str, content: str) -> None:
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp_path, path)
 
 DISABLED_TOOLSETS_COMMENT = (
     "  # disabled_toolsets composes unconditionally as a subtraction step --\n"
@@ -69,8 +85,7 @@ def main() -> int:
         block = build_block(toolsets, "  ")
         content = content.rstrip("\n") + "\n\nagent:\n" + block
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    _atomic_write(path, content)
     print("CHANGED")
     return 0
 

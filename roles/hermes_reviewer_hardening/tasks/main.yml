@@ -51,13 +51,25 @@
     hermes_reviewer_hardening_config_patch_result.rc != 0 or
     'UNSAFE' in hermes_reviewer_hardening_config_patch_result.stdout
 
+- name: hermes-reviewer-hardening | check whether a fire script already exists
+  ansible.builtin.stat:
+    path: "{{ hermes_reviewer_hardening_fire_script_path }}"
+  register: hermes_reviewer_hardening_fire_script_stat
+
 - name: hermes-reviewer-hardening | backup fire script
   ansible.builtin.copy:
     src: "{{ hermes_reviewer_hardening_fire_script_path }}"
     dest: "{{ hermes_reviewer_hardening_fire_script_path }}{{ hermes_reviewer_hardening_backup_suffix }}"
     remote_src: true
     force: false
-  ignore_errors: true  # fine if the fire script doesn't exist yet on a brand-new host
+  when: hermes_reviewer_hardening_fire_script_stat.stat.exists
+  # Comprehensive sweep finding (medium): ignore_errors: true previously
+  # masked BOTH the expected case (no fire script yet, brand-new host)
+  # AND a real failure (permissions, disk full) identically -- a genuine
+  # copy failure would silently let the role overwrite the live script
+  # with no backup. Now the two cases are distinguished explicitly via
+  # stat: skip cleanly when there's nothing to back up yet, but let a
+  # real copy failure fail the play as it should.
 
 - name: hermes-reviewer-hardening | deploy fire script (WS1.2 + WS2.2, Kimi-hardened)
   ansible.builtin.template:

@@ -22,9 +22,9 @@ import subprocess
 import sys
 
 HERMES = "/usr/local/bin/hermes"
-DEFAULT_PROFILES = [{% for p in hermes_reviewer_hardening_profiles %}"{{ p.name }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+DEFAULT_PROFILES = {{ hermes_reviewer_hardening_profiles | map(attribute='name') | list | to_json }}
 
-ALLOWED_TOOLSETS = {{"{"}}{% for t in hermes_reviewer_hardening_allowed_toolsets %}"{{ t }}"{% if not loop.last %}, {% endif %}{% endfor %}{{"}"}}
+ALLOWED_TOOLSETS = set({{ hermes_reviewer_hardening_allowed_toolsets | to_json }})
 
 ENABLED_RE = re.compile(r"^\s*\u2713\s+enabled\s+(\S+)")
 # Anchored to the actual `tools list` MCP section header format
@@ -33,7 +33,7 @@ ENABLED_RE = re.compile(r"^\s*\u2713\s+enabled\s+(\S+)")
 # contains "mcp" somewhere in its text.
 MCP_SECTION_RE = re.compile(r"^\s*MCP servers\s*:", re.IGNORECASE)
 
-STDERR_LOG = "{{ hermes_reviewer_hardening_assert_script_path }}.stderr.log"
+STDERR_LOG = {{ (hermes_reviewer_hardening_assert_script_path ~ ".stderr.log") | to_json }}
 
 
 def _log_stderr(profile: str, stderr: str) -> None:

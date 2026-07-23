@@ -16,10 +16,39 @@ This is the SAME patch applied by hand to CT152 on 2026-07-22 (backlog-346-
 ws2-ct152, cold-reviewed and gate-approved), with the Kimi second-opinion
 symlink/regular-file hardening (backlog-346-final-kimi-review, finding 3)
 folded in from the start rather than applied as a second pass.
+
+Hardened again 2026-07-23 per the comprehensive final Kimi sweep
+(backlog-346-everything-final-sweep):
+- HIGH: the "already patched" check previously only looked for the marker
+  comment. A partially reverted file (marker kept, wiring/function/imports
+  removed by a manual edit) would report UNCHANGED -- "nothing to do,
+  all good" -- to every caller (the n8n auto-reapply step, the Ansible
+  role), while the actual argv leak fix was silently gone. Now verifies
+  the marker AND the wiring AND the function definition AND both new
+  imports before ever reporting UNCHANGED; a partial state is refused
+  (UNSAFE exit) rather than silently accepted or blindly "fixed" by
+  guessing what's missing.
+- MEDIUM: writes were previously a bare open(path, "w") -- an interrupted
+  process or storage failure mid-write could leave the file truncated.
+  Now writes to a temp file in the same directory and os.replace()s it
+  into place, which is atomic on the same filesystem.
 """
+import os
+import re
 import sys
 
 PATCH_MARKER = "HERMES-LOCALPATCH: oneshot-file-indirection v1"
+
+# Anchored specifically to the -z/--oneshot parser.add_argument(...) block,
+# not a bare substring search anywhere in the file (Kimi finding, medium:
+# the previous unanchored regex could match a stray comment elsewhere and
+# falsely conclude the patch was wired in).
+WIRING_RE = re.compile(
+    r'parser\.add_argument\(\s*\n\s*"-z"\s*,\s*\n\s*"--oneshot"\s*,'
+    r'(?:[^)]*?)type\s*=\s*_oneshot_prompt\s*,',
+    re.DOTALL,
+)
+FUNCTION_DEF_RE = re.compile(r"^def _oneshot_prompt\(value: str\) -> str:", re.MULTILINE)
 
 PATCH_SNIPPET = '''# HERMES-LOCALPATCH: oneshot-file-indirection v1
 # Local divergence from upstream hermes-agent. Submitted upstream as a PR
@@ -64,10 +93,19 @@ def _oneshot_prompt(value: str) -> str:
         return value
 
     path = value[1:]
-    # TOCTOU-safe (Hermes finding 1, backlog-346-ws2-ct152): size check
-    # and read happen against the SAME open fd, not a separate stat().
-    # Symlink/regular-file-safe (Kimi finding 3, backlog-346-final-kimi-
-    # review): O_NOFOLLOW + S_ISREG on that same fd, no new TOCTOU window.
+    # Hermes cold review finding 1 (backlog-346-ws2-ct152): the previous
+    # version called os.path.getsize() then open() separately, leaving a
+    # TOCTOU window where the file could be swapped between the size
+    # check and the read. Fixed by opening once and doing both the size
+    # check and the read against the SAME open file description, via
+    # os.fstat() on the live fd rather than a fresh stat() on the path.
+    #
+    # Kimi cold review finding 3 (backlog-346-final-kimi-review): opening
+    # the path with no symlink/file-type guard meant a swapped symlink
+    # could redirect the prompt source, and a FIFO or device node could
+    # hang the parser or return unbounded content. O_NOFOLLOW closes the
+    # symlink path; the S_ISREG check after fstat rejects anything that
+    # isn't a plain file, on the same open fd (no new TOCTOU window).
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as exc:
@@ -92,10 +130,14 @@ def _oneshot_prompt(value: str) -> str:
     finally:
         fh.close()
 
-    # Strict UTF-8 (Hermes finding 2, backlog-346-ws2-ct152): surrogateescape
-    # would let invalid UTF-8 through and crash a later strict re-encode
-    # somewhere less diagnosable. This is a code-review pipeline where
-    # source is expected to be valid UTF-8 -- reject loudly here instead.
+    # Hermes cold review finding 2 (backlog-346-ws2-ct152): surrogateescape
+    # was previously used to decode, which maps invalid UTF-8 bytes to lone
+    # surrogates that crash any later strict-UTF-8 re-encode (JSON, HTTP
+    # body, logging) with an unhandled UnicodeEncodeError deep downstream.
+    # This is a code-review pipeline where source files are expected to be
+    # valid UTF-8 -- reject invalid encoding loudly HERE, at parse time,
+    # rather than let a mangled string travel further and fail somewhere
+    # less diagnosable.
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
@@ -104,10 +146,12 @@ def _oneshot_prompt(value: str) -> str:
         )
 
     if not text:
-        # Zero-byte check only (Hermes finding 5): whitespace-only content
-        # (e.g. a lone trailing newline) is NOT rejected -- it's truthy, so
-        # the `if getattr(args, "oneshot", None)` check at both call sites
-        # still takes the oneshot branch correctly.
+        # Hermes cold review finding 5 (backlog-346-ws2-ct152): message
+        # corrected -- this guard rejects empty-of-bytes content only.
+        # Whitespace-only files (e.g. a lone trailing newline) are NOT
+        # rejected here; they are falsy-safe because a non-empty string
+        # (even "\\n") is truthy, so the `if getattr(args, "oneshot", None)`
+        # check at both call sites still takes the oneshot branch correctly.
         raise argparse.ArgumentTypeError(
             f"--oneshot: prompt file {path!r} is empty (zero bytes)"
         )
@@ -131,7 +175,6 @@ OLD_ARG_BLOCK = '''    parser.add_argument(
             "auto-bypassed. Intended for scripts / pipes."
         ),
     )'''
-
 NEW_ARG_BLOCK = '''    parser.add_argument(
         "-z",
         "--oneshot",
@@ -152,6 +195,28 @@ NEW_ARG_BLOCK = '''    parser.add_argument(
     )'''
 
 
+def _fully_wired(content: str) -> bool:
+    """True only if the marker, the wiring, the function definition, and
+    both new imports are ALL present. Anything less is a partial state
+    that must not be silently accepted."""
+    return bool(
+        PATCH_MARKER in content
+        and WIRING_RE.search(content)
+        and FUNCTION_DEF_RE.search(content)
+        and "\nimport os\n" in content
+        and "\nimport stat\n" in content
+    )
+
+
+def _atomic_write(path: str, content: str) -> None:
+    """Write via a same-directory temp file + os.replace(), so an
+    interrupted write can never leave the target truncated or corrupt."""
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp_path, path)
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: patch_hermes_parser.py <path-to-_parser.py>", file=sys.stderr)
@@ -161,9 +226,21 @@ def main() -> int:
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if PATCH_MARKER in content:
+    if _fully_wired(content):
         print("UNCHANGED")
         return 0
+
+    if PATCH_MARKER in content:
+        # Marker present but something else (wiring/function/imports) is
+        # missing -- a partial, unexpected state. Do not guess at what to
+        # fix; refuse and let a human re-verify ground truth, same as an
+        # anchor mismatch below.
+        print(f"UNSAFE: {PATCH_MARKER!r} is present in {path!r} but the "
+              f"wiring/function/imports are not all intact -- this is a "
+              f"partially reverted or hand-edited state, not the clean "
+              f"unpatched state this script knows how to patch from. "
+              f"Refusing to guess at what to fix.", file=sys.stderr)
+        return 1
 
     if content.count(ANCHOR) != 1:
         print(f"UNSAFE: expected exactly 1 occurrence of the insertion anchor, "
@@ -184,18 +261,20 @@ def main() -> int:
     content = content.replace(ANCHOR, "\n" + PATCH_SNIPPET + "def build_top_level_parser():", 1)
     content = content.replace(OLD_ARG_BLOCK, NEW_ARG_BLOCK, 1)
 
-    # Fresh/unpatched hermes-agent installs have only "import argparse" here
-    # (no "import os" yet -- that's part of what this patch adds). Insert
-    # both new imports together, anchored on the original single import.
     if content.count("import argparse\n") != 1:
-        print(f"UNSAFE: expected exactly 1 occurrence of 'import argparse', "
-              f"found {content.count('import argparse' + chr(10))} -- "
-              f"refusing to patch blindly.", file=sys.stderr)
+        print("UNSAFE: expected exactly 1 occurrence of 'import argparse', "
+              "refusing to patch blindly.", file=sys.stderr)
         return 1
     content = content.replace("import argparse\n", "import argparse\nimport os\nimport stat\n", 1)
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    if not _fully_wired(content):
+        print("UNSAFE: patch was applied but self-verification failed -- "
+              "the resulting file doesn't pass the same completeness check "
+              "used to detect an already-patched file. Not writing anything.",
+              file=sys.stderr)
+        return 1
+
+    _atomic_write(path, content)
     print("CHANGED")
     return 0
 

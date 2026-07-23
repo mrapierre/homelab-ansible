@@ -36,12 +36,13 @@ both the correct place for the check and a strictly larger, more accurate
 limit than a duplicate check in this script would be.
 """
 import os
+import stat
 import re
 import subprocess
 import sys
 
 ALLOWED_PROFILES = {
-{% for p in hermes_reviewer_hardening_profiles %}    "{{ p.name }}": "{{ p.wrapper_path }}",
+{% for p in hermes_reviewer_hardening_profiles %}    {{ p.name | to_json }}: {{ p.wrapper_path | to_json }},
 {% endfor %}}
 
 # Known, accepted maintenance hazard: both absolute paths below are
@@ -51,12 +52,17 @@ ALLOWED_PROFILES = {
 # failing closed (refusing to spawn) when either path is wrong/missing is
 # exactly the desired behaviour for an upgrade that silently changed the
 # layout.
-PARSER_PATH = "{{ hermes_reviewer_hardening_parser_path }}"
+PARSER_PATH = {{ hermes_reviewer_hardening_parser_path | to_json }}
 PATCH_MARKER = "HERMES-LOCALPATCH: oneshot-file-indirection v1"
-ASSERT_SCRIPT = "{{ hermes_reviewer_hardening_assert_script_path }}"
+ASSERT_SCRIPT = {{ hermes_reviewer_hardening_assert_script_path | to_json }}
 # Kimi cold review finding 5: proves the patch is actually WIRED onto the
 # -z argument, not just present somewhere in the file as dead code.
-PATCH_WIRING_RE = re.compile(r"type\s*=\s*_oneshot_prompt\s*,")
+PATCH_WIRING_RE = re.compile(
+    r'parser\.add_argument\(\s*\n\s*"-z"\s*,\s*\n\s*"--oneshot"\s*,'
+    r'(?:[^)]*?)type\s*=\s*_oneshot_prompt\s*,',
+    re.DOTALL,
+)
+PATCH_FUNCTION_RE = re.compile(r"^def _oneshot_prompt\(value: str\) -> str:", re.MULTILINE)
 
 
 def _patch_preflight() -> str | None:
@@ -82,6 +88,11 @@ def _patch_preflight() -> str | None:
                 f"partially reverted (marker kept, wiring removed). "
                 f"Refusing to spawn rather than silently fall back to "
                 f"argv-based prompt delivery.")
+    if not PATCH_FUNCTION_RE.search(content):
+        return (f"{PARSER_PATH!r} has the marker and the wiring but the "
+                f"_oneshot_prompt function definition itself appears to be "
+                f"missing -- an even more unusual partial state. Refusing "
+                f"to spawn.")
     return None
 
 
@@ -120,8 +131,19 @@ def main():
         )
         sys.exit(2)
 
-    if not os.path.isfile(prompt_file):
-        print(f"refusing: prompt_file {prompt_file!r} is not a regular file", file=sys.stderr)
+    try:
+        _probe_fd = os.open(prompt_file, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(_probe_fd).st_mode):
+                print(f"refusing: prompt_file {prompt_file!r} is not a regular "
+                      f"file (refusing symlinks, FIFOs, device nodes, etc.)",
+                      file=sys.stderr)
+                sys.exit(2)
+        finally:
+            os.close(_probe_fd)
+    except OSError as e:
+        print(f"refusing: prompt_file {prompt_file!r} could not be opened "
+              f"for the pre-flight check: {e}", file=sys.stderr)
         sys.exit(2)
 
     if not os.path.isabs(prompt_file):

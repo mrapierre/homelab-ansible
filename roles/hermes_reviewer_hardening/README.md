@@ -105,6 +105,72 @@ CT152 in the first place (`changed=0` on a second run). Delete this
 playbook and fold CT152 into `hermes_reviewer_hardening.yml` properly
 once backlog #342 lands.
 
+## Hardened again 2026-07-23 (comprehensive Kimi sweep)
+
+After everything above was built, Anthony asked for a full sweep: every
+artifact in the whole backlog #346/347/348/349 effort run through Kimi
+once more, including the pieces that had never been reviewed at all
+(this role's two patcher scripts, its two Jinja2 templates, its
+tasks/main.yml, and the n8n auto-reapply script). 12 findings (1 high,
+6 medium, 5 low), 10 fixed and verified live, 2 deferred:
+
+- **HIGH, fixed**: `patch_hermes_parser.py`'s "already patched" check was
+  marker-comment-only. A partially reverted `_parser.py` (marker kept,
+  wiring/function/imports stripped by a manual edit) would report
+  `UNCHANGED` -- silently telling every caller (the n8n step, this role)
+  that everything was fine while the actual argv-leak fix was gone. Now
+  verifies the marker AND the wiring AND the function definition AND
+  both imports before ever reporting `UNCHANGED`; a partial state is
+  refused (`UNSAFE`) rather than guessed at.
+- **MEDIUM, fixed**: both patchers now write via a same-directory temp
+  file + `os.replace()` (atomic), not a bare `open(path, "w")`.
+- **MEDIUM, fixed**: the fire script's/template's patch-wiring regex is
+  now anchored to the actual `-z`/`--oneshot` `parser.add_argument(...)`
+  block (previously an unanchored substring search that could match
+  inside a comment), plus a separate check that the function definition
+  itself exists.
+- **MEDIUM, fixed**: the fire script's/template's `prompt_file`
+  pre-check upgraded from `os.path.isfile()` to `O_NOFOLLOW` + `S_ISREG`
+  on a single fd -- closes a TOCTOU window in the fire script's own
+  pre-check (the actual read inside hermes was already safe via the
+  `_parser.py` patch's own `O_NOFOLLOW`/`S_ISREG` handling).
+- **MEDIUM, fixed**: both Jinja2 templates now render every substituted
+  value through the `to_json` filter instead of raw string
+  interpolation -- a value containing a quote or backslash previously
+  risked producing invalid or injectable Python.
+- **MEDIUM, fixed**: the fire-script backup task's `ignore_errors: true`
+  masked a real copy failure identically to the expected "no script yet
+  on a brand-new host" case. Now an explicit `stat` check distinguishes
+  them.
+- **LOW, fixed**: the assert template's `ALLOWED_TOOLSETS` rendering
+  (fixed as part of the same `to_json` rewrite) now produces a real
+  Python `set()` rather than an empty dict if the toolset list were
+  ever empty -- a latent type bug, harmless today since the list is
+  never actually empty, but real.
+- **LOW, fixed**: the n8n auto-reapply step's fixed `sleep 3` after the
+  dashboard restart replaced with a short `systemctl is-active` poll
+  loop.
+- **LOW, fixed**: the one remaining unquoted interpolation in
+  `run_review.py`'s fire-script preflight (`test -r`) now goes through
+  `shlex.quote()`, for consistency with the rest of that function.
+- **LOW, deferred**: a theoretical append-race between `fstat()` and
+  `read()` in `_oneshot_prompt()` if the prompt file were writable by
+  another process -- accepted given the single-root-owned-host
+  deployment context; the suggested `chattr +i` mitigation adds real
+  operational complexity for marginal benefit here.
+- **LOW, deferred**: the stale-file sweeper's `/tmp` glob is broad
+  enough to delete an unrelated same-prefixed file -- accepted because
+  the sweeper isn't active anywhere yet (always run with
+  `hermes_reviewer_hardening_install_sweeper: false` against CT152 this
+  session; the one playbook where it's enabled, targeting `vps_ihostart`,
+  has never actually run since the VPS was unreachable all session).
+  Fix (dedicated directory, non-guessable naming) before it's ever
+  turned on for real.
+
+Full findings, fixes, and live verification evidence:
+`reviews/backlog-346-everything-final-sweep/` in the ai-sandbox repo on
+VM151.
+
 ## Known gaps
 
 - **CT152 isn't in this repo's inventory yet** (backlog #342 — its own
