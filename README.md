@@ -37,6 +37,17 @@ Infrastructure as Code for the Sevenbirches homelab.
   pre-hardening design sheet, NOT re-verified live -- the VPS was down
   for the entire session this role was built in. Re-verify ground truth
   on ihostart before the first real run there.
+- `hermes_reviewer_hardening_ct152_adhoc.yml` — same role, targeting
+  CT152 directly by IP (no inventory entry, since CT152 isn't in
+  inventory yet -- backlog #342). Run with
+  `ansible-playbook -i "192.168.55.152," playbooks/hermes_reviewer_hardening_ct152_adhoc.yml`.
+  Only needed for a genuine config change or suspected drift outside
+  CT152's normal update path -- day-to-day, CT152's `_parser.py` patch
+  reapplies itself automatically via a step in the "Hermes Auto-Update
+  (CT152, Daily)" n8n workflow (not via Ansible at all -- see the
+  role's own README for why the split works that way). Delete this
+  playbook and fold CT152 into `hermes_reviewer_hardening.yml` properly
+  once backlog #342 lands.
 
 ## Usage
 ```bash

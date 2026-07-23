@@ -53,6 +53,58 @@ run correctly reported `UNCHANGED` on both patchers since CT152 already
 had everything hand-applied and gate-approved; second run reported
 `changed=0` across the board.
 
+## Automatic reapply after CT152's nightly update (separate from this role)
+
+CT152 runs a daily `hermes update` (n8n workflow "Hermes Auto-Update
+(CT152, Daily)", id `9JG2OZAtAHFTjmrR`, 3am kick-off / 3:15am check)
+that does a `git pull` inside `/usr/local/lib/hermes-agent` -- the ONLY
+thing that touches is `_parser.py`. The fire script, assert script, and
+`config.yaml` all live under `/root/.hermes/` (HERMES_HOME), which the
+update never goes near.
+
+Because of that, keeping CT152's `_parser.py` patch alive after every
+update does NOT go through this role or Ansible at all. Instead:
+`files/patch_hermes_parser.py` (the same script this role uses) is ALSO
+deployed permanently and directly to CT152 at
+`/root/.hermes/handover/patch_hermes_parser.py` (deployed by hand,
+2026-07-23 -- not tracked by any Ansible run, so if this role's copy of
+patch_hermes_parser.py is ever changed, CT152's standalone copy needs
+updating separately, by hand or via the ad hoc playbook below). The
+n8n workflow's post-update check now runs it automatically, before
+restarting the dashboard: if the patch survived, it's a no-op
+(`UNCHANGED`); if the update wiped it, it's silently reapplied
+(`CHANGED`) and a privilege-assertion sanity check runs afterward, with
+the outcome reported to Telegram either way. Verified for real
+2026-07-23 by deliberately reverting CT152's `_parser.py` to its
+pre-patch state, simulating a successful update, and confirming the
+workflow's exact stored command detected and repaired it.
+
+This means: **the fire script / assert script / config.yaml never need
+reapplying** (they're never touched by the update), and **`_parser.py`
+reapplies itself automatically** (via the n8n step, not this role).
+The only reason to actually run this Ansible role against CT152 again
+is a genuine config change (e.g. widening/narrowing the allowlist) or
+suspected drift outside the update path -- for that, see the ad hoc
+playbook below.
+
+## Re-running the full role against CT152 by hand
+
+CT152 still isn't in this repo's inventory (see Known gaps). For a
+full manual re-apply (all five deployed pieces, not just the
+`_parser.py` patch the n8n step handles), use the dedicated ad hoc
+playbook, which targets CT152 by IP directly and needs no inventory
+entry:
+
+```
+cd /opt/ansible
+ansible-playbook -i "192.168.55.152," playbooks/hermes_reviewer_hardening_ct152_adhoc.yml
+```
+
+This is also how the role itself was verified idempotent against
+CT152 in the first place (`changed=0` on a second run). Delete this
+playbook and fold CT152 into `hermes_reviewer_hardening.yml` properly
+once backlog #342 lands.
+
 ## Known gaps
 
 - **CT152 isn't in this repo's inventory yet** (backlog #342 — its own

@@ -1,0 +1,30 @@
+---
+# Hermes Reviewer Hardening -- CT152, post-auto-update re-apply
+#
+# CT152 is deliberately NOT in this repo's committed inventory (backlog
+# #342 stays its own dedicated session). This playbook targets it via an
+# inline host definition instead -- no inventory file touched, nothing
+# for #342 to conflict with. Delete this file and fold CT152 into
+# hermes_reviewer_hardening.yml properly once #342 lands.
+#
+# Purpose: CT152's daily `hermes update` (n8n workflow "Hermes
+# Auto-Update (CT152, Daily)", 3am/3:15am) pulls fresh code from
+# upstream NousResearch/hermes-agent, which overwrites the uncommitted
+# local _parser.py patch (backlog #346) this role applies. Until now
+# that was caught (fail-closed: the fire script refuses to spawn rather
+# than silently fall back to the leaky behaviour) but not FIXED
+# automatically -- the reviewer just stayed down until someone noticed
+# and re-ran the role by hand. This playbook is that automatic re-apply,
+# run as a third step in the same n8n workflow right after the existing
+# restart-and-notify step.
+
+- name: Hermes Reviewer Hardening -- CT152 (ad hoc, no inventory entry)
+  hosts: 192.168.55.152
+  become: true
+  gather_facts: true
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: /root/.ssh/id_rsa
+    hermes_reviewer_hardening_install_sweeper: false  # already installed by hand, don't duplicate
+  roles:
+    - hermes_reviewer_hardening
